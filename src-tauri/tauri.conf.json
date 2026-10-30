@@ -1,0 +1,107 @@
+{
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devPath": "http://127.0.0.1:3000",
+    "beforeBuildCommand": "npm run build",
+    "distDir": "../dist"
+  },
+  "package": {
+    "productName": "趋势",
+    "version": "0.1.0"
+  },
+  "tauri": {
+    "allowlist": {
+      "all": false,
+      "fs": {
+        "all": true,
+        "scope": ["$HOME/*", "$APPDATA/*", "$APPCONFIG/*", "$TEMP/*"]
+      },
+      "path": {
+        "all": true
+      },
+      "window": {
+        "all": true
+      },
+      "dialog": {
+        "all": true
+      },
+      "clipboard": {
+        "all": true
+      },
+      "process": {
+        "all": true
+      },
+      "http": {
+        "all": true,
+        "scope": [
+          "https://searchadapter.eastmoney.com/*",
+          "https://*.eastmoney.com/*",
+          "https://legulegu.com/*"
+        ]
+      },
+      "globalShortcut": {
+        "all": true
+      },
+      "notification": {
+        "all": true
+      },
+      "os": {
+        "all": true
+      },
+      "shell": {
+        "open": true,
+        "scope": [
+          {
+            "name": "open-url",
+            "cmd": "explorer",
+            "args": ["{path}"]
+          }
+        ]
+      }
+    },
+    "bundle": {
+      "active": true,
+      "targets": "msi",
+      "identifier": "com.daic.qushi",
+      "icon": [
+        "icons/32x32.png",
+        "icons/128x128.png",
+        "icons/128x128@2x.png",
+        "icons/icon.ico"
+      ],
+      "category": "Utility",
+      "shortDescription": "趋势",
+      "longDescription": "趋势 - 轻量桌面盯盘工具",
+      "windows": {
+        "wix": {
+          "language": "zh-CN"
+        },
+        "webviewInstallMode": {
+          "type": "downloadBootstrapper"
+        }
+      }
+    },
+    "windows": [
+      {
+        "label": "main",
+        "title": "趋势",
+        "width": 560,
+        "height": 305,
+        "minWidth": 300,
+        "minHeight": 150,
+        "resizable": false,
+        "fullscreen": false,
+        "decorations": false,
+        "transparent": true,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "center": true,
+        "visible": true,
+        "url": "index.html"
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  }
+}

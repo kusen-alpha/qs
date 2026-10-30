@@ -1,0 +1,25 @@
+[package]
+name = "qushi"
+version = "0.1.0"
+description = "趋势 - 桌面盯盘工具"
+authors = ["daic"]
+license = "MIT"
+repository = ""
+edition = "2021"
+rust-version = "1.60"
+
+[build-dependencies]
+tauri-build = { version = "=1.2.1", features = [] }
+
+[dependencies]
+tauri = { version = "=1.2.4", features = ["devtools", "shell-open", "global-shortcut-all", "notification-all", "window-all", "fs-all", "path-all", "http-all", "os-all", "dialog-all", "clipboard-all", "process-all"] }
+tauri-plugin-single-instance = { git = "https://github.com/tauri-apps/plugins-workspace", branch = "v1" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[patch.crates-io]
+# crates.io 已 yank 全部 cargo_toml 0.13.x；tauri-build 1.2.1（对齐 tauri 1.2.4）需要它。
+cargo_toml = { path = "vendor/cargo_toml" }
+
+[features]
+custom-protocol = ["tauri/custom-protocol"]

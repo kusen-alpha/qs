@@ -131,8 +131,8 @@ async function fitWindowSize() {
   const gridWidth = 92 + columns.value.length * 24;
   const rightInset = window.innerWidth - rect.right;
   const width = Math.ceil(rect.left + gridWidth + rightInset);
-  const { getCurrent, LogicalSize } = await import('@tauri-apps/api/window');
-  await getCurrent().setSize(new LogicalSize(width, height));
+  const { getCurrentWindow, LogicalSize } = await import('@tauri-apps/api/window');
+  await getCurrentWindow().setSize(new LogicalSize(width, height));
 }
 
 onUnmounted(() => {
@@ -163,8 +163,8 @@ onMounted(load);
 
 async function close() {
   if (!isTauri()) return;
-  const { getCurrent } = await import('@tauri-apps/api/window');
-  getCurrent().close();
+  const { getCurrentWindow } = await import('@tauri-apps/api/window');
+  getCurrentWindow().close();
 }
 </script>
 

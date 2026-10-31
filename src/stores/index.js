@@ -1,7 +1,7 @@
 import { createPinia } from 'pinia';
 import piniaPluginPersistedstate from 'pinia-plugin-persistedstate';
-import { getCurrent } from '@tauri-apps/api/window';
-import { invoke } from '@tauri-apps/api/tauri';
+import { getCurrentWindow } from '@tauri-apps/api/window';
+import { invoke } from '@tauri-apps/api/core';
 import { isTauri } from '../utils/env';
 import { ensureFile, readData, writeData, Files } from '../utils/file';
 import { useSettingStore } from './setting';
@@ -29,7 +29,7 @@ async function hydrateStore(initialState, folder, file, store, encrypt) {
 /** 仅主窗口负责磁盘数据初始化 */
 export async function initStores() {
   if (!isTauri()) return;
-  const current = getCurrent();
+  const current = getCurrentWindow();
   if (current.label !== 'main') return;
 
   const setting = useSettingStore();

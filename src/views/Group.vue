@@ -49,7 +49,7 @@
 
 <script setup>
 import { onMounted, watch } from 'vue';
-import { getCurrent } from '@tauri-apps/api/window';
+import { getCurrentWindow } from '@tauri-apps/api/window';
 import { ElMessage } from 'element-plus';
 import GroupMenu from '../components/group/GroupMenu.vue';
 import GroupHeader from '../components/group/GroupHeader.vue';
@@ -110,7 +110,7 @@ function save() {
 
 function closeWindow() {
   if (!isTauri()) return;
-  getCurrent().close().catch(() => {});
+  getCurrentWindow().close().catch(() => {});
 }
 
 onMounted(() => {

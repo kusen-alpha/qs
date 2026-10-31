@@ -12,6 +12,10 @@
 *.log
 vitest.config.js.timestamp-*
 
+# AI 工具快照
+.ai-stats/
+
 # 系统文件
 .DS_Store
 Thumbs.db
+/src-tauri/gen

@@ -61,15 +61,33 @@
       </template>
       <template #desc> 开启后，程序会在系统启动时自动启动 </template>
     </SettingItem>
+
+    <SettingItem v-if="appInfo" title="版本">
+      <template #main>
+        <span class="version-text">v{{ appInfo.version }}（{{ appInfo.buildDate }} 构建）</span>
+      </template>
+    </SettingItem>
   </div>
 </template>
 
 <script setup>
-import { computed } from 'vue';
+import { computed, onMounted, ref } from 'vue';
 import SettingItem from './SettingItem.vue';
+import { invoke } from '@tauri-apps/api/core';
 import { useCacheStore } from '../../stores/cache';
+import { isTauri } from '../../utils/env';
 
 const cache = useCacheStore();
+const appInfo = ref(null);
+
+onMounted(async () => {
+  if (!isTauri()) return;
+  try {
+    appInfo.value = await invoke('app_info');
+  } catch (e) {
+    /* 插件未就绪时忽略 */
+  }
+});
 
 const firstCols = [
   { key: 'price', label: '当前价' },
@@ -106,3 +124,10 @@ const checkedFields = computed({
   },
 });
 </script>
+
+<style scoped>
+.version-text {
+  font-size: 13px;
+  color: #909399;
+}
+</style>

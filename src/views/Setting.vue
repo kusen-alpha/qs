@@ -73,7 +73,7 @@
 <script setup>
 import { onMounted } from 'vue';
 import { ElMessage } from 'element-plus';
-import { getCurrent } from '@tauri-apps/api/window';
+import { getCurrentWindow } from '@tauri-apps/api/window';
 import SettingMenu from '../components/setting/SettingMenu.vue';
 import SettingHeader from '../components/setting/SettingHeader.vue';
 import SettingMain from '../components/setting/SettingMain.vue';
@@ -116,7 +116,7 @@ function save() {
 
 function close() {
   if (isTauri()) {
-    getCurrent().close();
+    getCurrentWindow().close();
     return;
   }
   location.hash = '#/';

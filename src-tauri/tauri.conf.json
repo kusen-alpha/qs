@@ -1,87 +1,15 @@
 {
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "趋势",
+  "version": "0.1.0",
+  "identifier": "com.daic.qushi",
   "build": {
     "beforeDevCommand": "npm run dev",
-    "devPath": "http://127.0.0.1:3000",
+    "devUrl": "http://127.0.0.1:3000",
     "beforeBuildCommand": "npm run build",
-    "distDir": "../dist"
+    "frontendDist": "../dist"
   },
-  "package": {
-    "productName": "趋势",
-    "version": "0.1.0"
-  },
-  "tauri": {
-    "allowlist": {
-      "all": false,
-      "fs": {
-        "all": true,
-        "scope": ["$HOME/*", "$APPDATA/*", "$APPCONFIG/*", "$TEMP/*"]
-      },
-      "path": {
-        "all": true
-      },
-      "window": {
-        "all": true
-      },
-      "dialog": {
-        "all": true
-      },
-      "clipboard": {
-        "all": true
-      },
-      "process": {
-        "all": true
-      },
-      "http": {
-        "all": true,
-        "scope": [
-          "https://searchadapter.eastmoney.com/*",
-          "https://*.eastmoney.com/*",
-          "https://legulegu.com/*",
-          "https://*.10jqka.com.cn/*"
-        ]
-      },
-      "globalShortcut": {
-        "all": true
-      },
-      "notification": {
-        "all": true
-      },
-      "os": {
-        "all": true
-      },
-      "shell": {
-        "open": true,
-        "scope": [
-          {
-            "name": "open-url",
-            "cmd": "explorer",
-            "args": ["{path}"]
-          }
-        ]
-      }
-    },
-    "bundle": {
-      "active": true,
-      "targets": "msi",
-      "identifier": "com.daic.qushi",
-      "icon": [
-        "icons/32x32.png",
-        "icons/128x128.png",
-        "icons/128x128@2x.png",
-        "icons/icon.ico"
-      ],
-      "category": "Utility",
-      "shortDescription": "趋势",
-      "longDescription": "趋势 - 轻量桌面盯盘工具",
-      "windows": {
-        "wix": {
-          "language": "zh-CN"
-        },
-        "webviewInstallMode": {
-          "type": "downloadBootstrapper"
-        }
-      }
-    },
+  "app": {
     "windows": [
       {
         "label": "main",
@@ -97,12 +25,35 @@
         "alwaysOnTop": true,
         "skipTaskbar": true,
         "center": true,
-        "visible": true,
-        "url": "index.html"
+        "visible": true
       }
     ],
     "security": {
       "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": [
+      "nsis"
+    ],
+    "category": "Utility",
+    "shortDescription": "趋势",
+    "longDescription": "趋势 - 轻量桌面盘盘工具",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.ico"
+    ],
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser"
+      },
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper",
+        "silent": true
+      }
     }
   }
 }

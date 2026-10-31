@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia';
 import { isEqual } from 'lodash-es';
-import { invoke } from '@tauri-apps/api/tauri';
+import { invoke } from '@tauri-apps/api/core';
 import { emit } from '../utils/events';
 import { writeData, Files } from '../utils/file';
 import { isTauri } from '../utils/env';

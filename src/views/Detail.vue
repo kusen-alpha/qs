@@ -174,20 +174,20 @@ function handleRealtime(event) {
 
 async function closeDetail() {
   if (!isTauri()) return;
-  const { getCurrent } = await import('@tauri-apps/api/window');
-  await getCurrent().close();
+  const { getCurrentWindow } = await import('@tauri-apps/api/window');
+  await getCurrentWindow().close();
 }
 
 async function minimizeDetail() {
   if (!isTauri()) return;
-  const { getCurrent } = await import('@tauri-apps/api/window');
-  await getCurrent().minimize();
+  const { getCurrentWindow } = await import('@tauri-apps/api/window');
+  await getCurrentWindow().minimize();
 }
 
 async function toggleFullscreen() {
   if (!isTauri()) return;
-  const { getCurrent } = await import('@tauri-apps/api/window');
-  const win = getCurrent();
+  const { getCurrentWindow } = await import('@tauri-apps/api/window');
+  const win = getCurrentWindow();
   const maximized = await win.isMaximized();
   if (maximized) await win.unmaximize();
   else await win.maximize();
@@ -203,7 +203,7 @@ onMounted(() => {
   });
   if (isTauri()) {
     import('@tauri-apps/api/window')
-      .then(({ getCurrent }) => getCurrent().isMaximized())
+      .then(({ getCurrentWindow }) => getCurrentWindow().isMaximized())
       .then((value) => {
         isMaximized.value = !!value;
       })

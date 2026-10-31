@@ -57,7 +57,7 @@ export const WindowConfigs = {
       decorations: false,
       alwaysOnTop: false,
       transparent: true,
-      fileDropEnabled: false,
+      dragDropEnabled: false,
     },
   },
   setting: {
@@ -96,7 +96,7 @@ export const WindowConfigs = {
       decorations: false,
       alwaysOnTop: false,
       transparent: true,
-      fileDropEnabled: false,
+      dragDropEnabled: false,
     },
   },
 };
@@ -113,8 +113,9 @@ export async function openWindow(config, query = null) {
     return;
   }
   // Tauri 1.4 的 getAll 是命名导出（WebviewWindow 上没有静态 getAll），与原产物一致
-  const { WebviewWindow, getAll } = await import('@tauri-apps/api/window');
-  const all = getAll();
+  const { WebviewWindow } = await import('@tauri-apps/api/webviewWindow');
+  const { getAllWindows } = await import('@tauri-apps/api/window');
+  const all = await getAllWindows();
   for (const w of all) {
     if (w.label !== config.label && w.label !== 'main') {
       // 同一时间只保留一个子窗口
@@ -126,12 +127,18 @@ export async function openWindow(config, query = null) {
   if (query) {
     cfg.window.url = cfg.window.url + '?' + new URLSearchParams(query).toString();
   }
-  return new WebviewWindow(cfg.label, cfg.window);
+  const win = new WebviewWindow(cfg.label, cfg.window);
+  // 创建失败时 Tauri 只发 tauri://error 事件，不抛异常，这里记录下来便于排查
+  win.once?.('tauri://error', (e) => {
+    console.error(`[window] ${cfg.label} create failed`, e);
+  });
+  return win;
 }
 
 export async function closeWindow(config) {
   if (!isTauri()) return;
-  const { getAll } = await import('@tauri-apps/api/window');
-  const win = getAll().find((w) => w.label === config.label);
+  const { getAllWindows } = await import('@tauri-apps/api/window');
+  const all = await getAllWindows();
+  const win = all.find((w) => w.label === config.label);
   if (win) await win.close();
 }

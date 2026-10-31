@@ -1,5 +1,12 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { TauriStore } from '@/utils/tauriStore';
+
+const mocks = vi.hoisted(() => ({
+  invoke: vi.fn(async () => null),
+}));
+
+// 测试配置把 @tauri-apps/api/core 指向同一份 mock，这里直接 mock 该共享文件
+vi.mock('../../mocks/tauri-api.js', () => ({ invoke: mocks.invoke }));
 
 function newStore(name) {
   return new TauriStore(`tests/${name}.json`);
@@ -55,5 +62,55 @@ describe('tauriStore · 浏览器 localStorage 兼容层', () => {
     localStorage.setItem('pdd-store:tests/broken.json', '{not-json');
     expect(await store.get('a')).toBeUndefined();
     expect(await store.keys()).toEqual([]);
+  });
+});
+
+describe('tauriStore 路 Tauri 资源式 API', () => {
+  beforeEach(() => {
+    window.__TAURI_INTERNALS__ = {};
+    mocks.invoke.mockReset();
+  });
+
+  afterEach(() => {
+    delete window.__TAURI_INTERNALS__;
+  });
+
+  it('先 load 拿 rid，后续命令传 rid', async () => {
+    mocks.invoke.mockResolvedValueOnce(42);
+    const store = newStore('tauri-set');
+    await store.set('a', 1);
+    expect(mocks.invoke).toHaveBeenNthCalledWith(1, 'plugin:store|load', {
+      path: 'tests/tauri-set.json',
+    });
+    expect(mocks.invoke).toHaveBeenNthCalledWith(2, 'plugin:store|set', {
+      rid: 42,
+      key: 'a',
+      value: 1,
+    });
+  });
+
+  it('get 解包 (value, exists) 元组', async () => {
+    mocks.invoke.mockResolvedValueOnce(42).mockResolvedValueOnce([7, true]);
+    const store = newStore('tauri-get');
+    expect(await store.get('a')).toBe(7);
+    expect(mocks.invoke).toHaveBeenLastCalledWith('plugin:store|get', {
+      rid: 42,
+      key: 'a',
+    });
+  });
+
+  it('rid 只加载一次，跨命令复用', async () => {
+    mocks.invoke.mockImplementation((cmd) => {
+      if (cmd === 'plugin:store|load') return Promise.resolve(42);
+      if (cmd === 'plugin:store|get') return Promise.resolve([1, true]);
+      return Promise.resolve(null);
+    });
+    const store = newStore('tauri-once');
+    await store.set('a', 1);
+    await store.get('a');
+    const loadCalls = mocks.invoke.mock.calls.filter(
+      ([cmd]) => cmd === 'plugin:store|load',
+    );
+    expect(loadCalls).toHaveLength(1);
   });
 });

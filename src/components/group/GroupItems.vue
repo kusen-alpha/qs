@@ -182,8 +182,10 @@ async function openSearchWindow() {
     location.hash = '#/edit';
     return;
   }
-  const { WebviewWindow, getAll } = await import('@tauri-apps/api/window');
-  const exists = getAll().find((w) => w.label === WindowConfigs.search.label);
+  const { WebviewWindow } = await import('@tauri-apps/api/webviewWindow');
+  const { getAllWindows } = await import('@tauri-apps/api/window');
+  const all = await getAllWindows();
+  const exists = all.find((w) => w.label === WindowConfigs.search.label);
   if (exists) {
     await exists.setFocus().catch(() => {});
     return;

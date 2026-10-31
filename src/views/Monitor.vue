@@ -36,7 +36,7 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue';
 import {
-  getCurrent,
+  getCurrentWindow,
   LogicalSize,
   PhysicalPosition,
   availableMonitors,
@@ -77,7 +77,7 @@ function switchTab(key) {
 /* 右上角关闭：桌面端关闭主窗口退出应用 */
 function closeApp() {
   if (isTauri()) {
-    getCurrent().close();
+    getCurrentWindow().close();
     return;
   }
   location.hash = '#/';
@@ -118,7 +118,7 @@ function resizeWindow() {
   const width = setting.isFixWidth
     ? setting.fixedWidth
     : calcTableWidth(el.offsetWidth, el.offsetHeight, setting.watchFields, setting.tableSize);
-  getCurrent().setSize(new LogicalSize(width, el.offsetHeight)).catch(() => {});
+  getCurrentWindow().setSize(new LogicalSize(width, el.offsetHeight)).catch(() => {});
 }
 
 function scheduleResize() {
@@ -137,7 +137,7 @@ async function onLeave(event) {
       event.offsetX >= el.offsetWidth - 2 ||
       event.offsetY >= el.offsetHeight - 2);
   if (!nearEdge) return;
-  const win = getCurrent();
+  const win = getCurrentWindow();
   const [pos, size, monitors] = await Promise.all([
     win.outerPosition(),
     win.outerSize(),
@@ -157,7 +157,7 @@ async function onLeave(event) {
 
 async function onEnter() {
   if (!setting.isEdgeFold || !isTauri()) return;
-  const win = getCurrent();
+  const win = getCurrentWindow();
   const [pos, size, monitors] = await Promise.all([
     win.outerPosition(),
     win.outerSize(),
@@ -210,7 +210,7 @@ onMounted(async () => {
   offs.push(
     await on('hide_or_show_window', async () => {
       if (!isTauri()) return;
-      const win = getCurrent();
+      const win = getCurrentWindow();
       if (await win.isVisible()) await win.hide();
       else await win.show();
     }),
@@ -224,7 +224,7 @@ let registeredBossKey = null;
 
 async function registerBossKey() {
   if (!isTauri()) return;
-  const { register, unregister } = await import('@tauri-apps/api/globalShortcut');
+  const { register, unregister } = await import('@tauri-apps/plugin-global-shortcut');
   if (registeredBossKey) {
     await unregister(registeredBossKey).catch(() => {});
     registeredBossKey = null;
@@ -245,7 +245,7 @@ function bossKeyHandler(e) {
 onBeforeUnmount(() => {
   clearTimeout(resizeTimer);
   if (registeredBossKey && isTauri()) {
-    import('@tauri-apps/api/globalShortcut')
+    import('@tauri-apps/plugin-global-shortcut')
       .then(({ unregister }) => unregister(registeredBossKey))
       .catch(() => {});
   }

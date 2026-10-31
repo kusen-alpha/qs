@@ -11,7 +11,11 @@ export default defineConfig({
   resolve: {
     alias: [
       {
-        find: /^@tauri-apps\/api\/(tauri|event|window|fs|path|http)$/,
+        find: /^@tauri-apps\/api\/(core|tauri|event|window|webviewWindow|fs|path|http)$/,
+        replacement: path.resolve(process.cwd(), 'tests/mocks/tauri-api.js'),
+      },
+      {
+        find: /^@tauri-apps\/plugin-(fs|http|global-shortcut)$/,
         replacement: path.resolve(process.cwd(), 'tests/mocks/tauri-api.js'),
       },
       { find: '@', replacement: path.resolve(process.cwd(), 'src') },

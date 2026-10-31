@@ -30,3 +30,17 @@ export async function request(url, options = {}) {
   }
   return { ok: res.ok, status: res.status, data };
 }
+
+/** 以字节形式请求，供 GBK 等非 UTF-8 页面自行解码 */
+export async function requestBytes(url, options = {}) {
+  if (isTauri()) {
+    const res = await tauriFetch(url, {
+      method: options.method || 'GET',
+      headers: options.headers,
+      responseType: ResponseType.Binary,
+    });
+    return { ok: res.ok, status: res.status, data: new Uint8Array(res.data) };
+  }
+  const res = await fetch(url, { method: options.method || 'GET', headers: options.headers });
+  return { ok: res.ok, status: res.status, data: new Uint8Array(await res.arrayBuffer()) };
+}

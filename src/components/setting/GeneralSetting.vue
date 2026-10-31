@@ -82,6 +82,9 @@ const firstCols = [
 ];
 
 const secondCols = [
+  { key: 'concept_l1', label: '一级概念' },
+  { key: 'concept_l2', label: '二级概念' },
+  { key: 'concept_ths', label: '同花顺概念' },
   { key: 'position_profit_rate', label: '收益率' },
   { key: 'position_profit', label: '收益额' },
   { key: 'position_num', label: '持仓量' },

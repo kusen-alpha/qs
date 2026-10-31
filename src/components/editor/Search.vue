@@ -39,6 +39,20 @@
         </el-tag>
       </template>
     </el-table-column>
+    <el-table-column prop="concept_l1" label="一级概念" min-width="96">
+      <template #default="{ row }">{{ row.concept_l1 || '-' }}</template>
+    </el-table-column>
+    <el-table-column prop="concept_l2" label="二级概念" min-width="106">
+      <template #default="{ row }">{{ row.concept_l2 || '-' }}</template>
+    </el-table-column>
+    <el-table-column
+      prop="concept_ths"
+      label="同花顺概念"
+      min-width="180"
+      show-overflow-tooltip
+    >
+      <template #default="{ row }">{{ row.concept_ths || '-' }}</template>
+    </el-table-column>
     <el-table-column prop="IsAddCurGroup" label="IsAddCurGroup" fixed="right">
       <template #default="{ row }">
         <div class="action-btns">
@@ -62,6 +76,7 @@ import { Plus } from '@element-plus/icons-vue';
 import { useMonitorStore } from '../../stores/monitor';
 import { MonitorEvent } from '../../constants';
 import { request } from '../../utils/http';
+import { loadStockConcepts } from '../../api/ths';
 import { on } from '../../utils/events';
 import { isTauri } from '../../utils/env';
 
@@ -111,8 +126,26 @@ function buildParams(input, count = '5') {
   };
 }
 
+let conceptToken = 0;
+
 function clearList() {
+  conceptToken += 1;
   list.value = [];
+}
+
+/* 搜索结果补充申万一级/二级行业与同花顺概念，过期结果直接丢弃 */
+async function fillConcepts(rows) {
+  const token = ++conceptToken;
+  const map = await loadStockConcepts(rows.map((row) => row.Code)).catch(
+    () => ({}),
+  );
+  if (token !== conceptToken) return;
+  rows.forEach((row) => {
+    const item = map[row.Code] || {};
+    row.concept_l1 = item.l1 || '';
+    row.concept_l2 = item.l2 || '';
+    row.concept_ths = item.ths || '';
+  });
 }
 
 function markAdded(rows) {
@@ -135,6 +168,7 @@ async function searchStock() {
     const rows =
       payload && payload.QuotationCodeTable && payload.QuotationCodeTable.Data;
     list.value = rows ? markAdded(rows) : [];
+    if (rows && rows.length > 0) fillConcepts(list.value);
   } catch (e) {
     list.value = [];
   }

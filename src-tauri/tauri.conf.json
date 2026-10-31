@@ -36,7 +36,8 @@
         "scope": [
           "https://searchadapter.eastmoney.com/*",
           "https://*.eastmoney.com/*",
-          "https://legulegu.com/*"
+          "https://legulegu.com/*",
+          "https://*.10jqka.com.cn/*"
         ]
       },
       "globalShortcut": {

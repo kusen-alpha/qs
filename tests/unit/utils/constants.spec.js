@@ -37,6 +37,9 @@ describe('constants · 常量契约', () => {
       high: false,
       low: false,
       turn: true,
+      concept_l1: false,
+      concept_l2: false,
+      concept_ths: false,
       position_num: false,
       position_profit: false,
     });

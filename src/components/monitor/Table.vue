@@ -110,6 +110,31 @@
       </el-table-column>
 
       <el-table-column
+        v-if="setting.watchFields.concept_l1"
+        prop="concept_l1"
+        label="一级概念"
+        width="90"
+        align="center"
+        show-overflow-tooltip
+      />
+      <el-table-column
+        v-if="setting.watchFields.concept_l2"
+        prop="concept_l2"
+        label="二级概念"
+        width="100"
+        align="center"
+        show-overflow-tooltip
+      />
+      <el-table-column
+        v-if="setting.watchFields.concept_ths"
+        prop="concept_ths"
+        label="同花顺概念"
+        width="150"
+        align="center"
+        show-overflow-tooltip
+      />
+
+      <el-table-column
         v-if="setting.watchFields.position_num"
         prop="position_num"
         label="持仓量"
@@ -196,6 +221,7 @@ import { on } from '../../utils/events';
 import { openWindow, WindowConfigs } from '../../utils/windows';
 import { DetailPanel, StoreEvent, MonitorEvent } from '../../constants';
 import { signDays } from '../../utils/macd';
+import { loadStockConcepts } from '../../api/ths';
 import {
   EastmoneyApi,
   pickBySource,
@@ -214,6 +240,7 @@ const macd = useMacdStore();
 
 const rows = ref([]);
 const quotes = ref([]);
+const concepts = ref({});
 const api = new EastmoneyApi();
 const timers = { realtime: null, alert: null };
 
@@ -221,12 +248,27 @@ const menu = reactive({ visible: false, x: 0, y: 0 });
 const currentRow = ref(null);
 let offs = [];
 
+/* 行情行可能来自自选列表或实时接口，统一取出 6 位股票代码 */
+function codeOf(row) {
+  if (row.symbol) return row.symbol;
+  const parts = String(row.secid || '').split('.');
+  return parts.length > 1 ? parts[1] : '';
+}
+
 /* 行情行附加 MACD 连续天数：大于 0 为正数、小于 0 为负数，未取到日 K 显示 - */
 const tableRows = computed(() =>
   rows.value.map((row) => {
     const series = macd.series[row.secid];
     const days = series && series.length ? signDays(series) : null;
-    return { ...row, macd: days, macdText: days === null ? '-' : String(days) };
+    const concept = concepts.value[codeOf(row)] || {};
+    return {
+      ...row,
+      macd: days,
+      macdText: days === null ? '-' : String(days),
+      concept_l1: concept.l1 || '-',
+      concept_l2: concept.l2 || '-',
+      concept_ths: concept.ths || '-',
+    };
   }),
 );
 
@@ -269,6 +311,21 @@ function reload() {
 async function ensureMacd() {
   if (!setting.watchFields.macd) return;
   await macd.ensure(pickBySource(monitor.watchGroup, '1').map((s) => s.secid));
+}
+
+/* 按需拉取申万行业/同花顺概念（三列都关闭时不发起请求） */
+async function ensureConcepts() {
+  if (
+    !setting.watchFields.concept_l1 &&
+    !setting.watchFields.concept_l2 &&
+    !setting.watchFields.concept_ths
+  ) {
+    return;
+  }
+  const map = await loadStockConcepts(rows.value.map((row) => codeOf(row))).catch(
+    () => ({}),
+  );
+  concepts.value = { ...concepts.value, ...map };
 }
 
 async function loopRealtime() {
@@ -403,19 +460,24 @@ onMounted(async () => {
   loopRealtime();
   loopAlert();
   ensureMacd();
+  ensureConcepts();
   applyDragRegion(['el-table__cell', 'cell', 'el-table__empty-block', 'el-table__empty-text']);
 
   offs.push(await on('stateChange', () => {
     hideMenu();
     reload();
     ensureMacd();
+    ensureConcepts();
   }));
   offs.push(await on('settingChange', (e) => {
     hideMenu();
     if (e.payload.includes('watchFieldsChange') || e.payload.includes('tableSizeChange') || e.payload.includes('updownColorChange')) {
       setting.$hydrate({ runHooks: false });
     }
-    if (e.payload.includes('watchFieldsChange')) ensureMacd();
+    if (e.payload.includes('watchFieldsChange')) {
+      ensureMacd();
+      ensureConcepts();
+    }
   }));
   offs.push(await on('symbolConfigChange', () => {
     hideMenu();

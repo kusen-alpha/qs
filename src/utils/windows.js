@@ -79,6 +79,26 @@ export const WindowConfigs = {
       transparent: true,
     },
   },
+  boardChart: {
+    label: 'boardChart',
+    window: {
+      title: '板块图表',
+      url: '/#/boardchart',
+      width: 900,
+      height: 560,
+      minWidth: null,
+      minHeight: null,
+      x: null,
+      y: null,
+      center: true,
+      resizable: true,
+      maximized: false,
+      decorations: false,
+      alwaysOnTop: false,
+      transparent: true,
+      dragDropEnabled: false,
+    },
+  },
   marketWidth: {
     label: 'marketWidth',
     window: {

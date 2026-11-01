@@ -7,6 +7,11 @@ const routes = [
   { path: '/setting', name: 'setting', component: () => import('../views/Setting.vue') },
   { path: '/group', name: 'group', component: () => import('../views/Group.vue') },
   { path: '/market', name: 'market', component: () => import('../views/MarketWidth.vue') },
+  {
+    path: '/boardchart',
+    name: 'boardChart',
+    component: () => import('../views/BoardChart.vue'),
+  },
 ];
 
 const router = createRouter({
@@ -22,6 +27,8 @@ const PAGE_CLASS = {
   setting: 'setting',
   group: 'group',
   market: 'market',
+  // 板块/概念图表页沿用看盘页的样式前缀（左侧菜单 + 右侧图表）
+  boardChart: 'detail',
 };
 
 router.afterEach((to) => {

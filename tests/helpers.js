@@ -19,7 +19,7 @@ export function freshPinia() {
 
 /** 造一只股票 */
 export function stock(symbol, name = '股票' + symbol, secid = '1.' + symbol) {
-  return { symbol, name, secid, source: '1', exchange: 0 };
+  return { symbol, name, secid, source: '1' };
 }
 
 /** 造一个一级概念 */
@@ -28,7 +28,6 @@ export function concept(id, name, symbols = [], children = []) {
     id,
     id_str: String(id),
     name,
-    editable: id !== 0,
     symbols,
     children,
   };

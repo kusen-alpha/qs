@@ -26,7 +26,6 @@ function mountGroup() {
     {
       name: '行业',
       id: 1,
-      editable: true,
       symbols: [],
       children: [{ id: 2, name: '白酒', symbols: [{ symbol: '000858', name: '五粮液', secid: '0.000858' }] }],
     },
@@ -50,12 +49,9 @@ describe('Group 页面 · 分组编辑窗口', () => {
     // 旧分组没有 children 字段
     expect(cache.group[0].children).toEqual([]);
     expect(cache.group[0].id_str).toBe('0');
-    expect(cache.group[0].editable).toBe(false);
-    expect(cache.group[1].editable).toBe(true);
     expect(cache.group[1].children[0]).toMatchObject({
       name: '白酒',
       id_str: '2',
-      editable: true,
     });
     expect(cache.selectGroup).toBe(0);
   });
@@ -72,7 +68,6 @@ describe('Group 页面 · 分组编辑窗口', () => {
       name: '板块',
       id: 3,
       id_str: '3',
-      editable: true,
       symbols: [],
       children: [],
     });
@@ -84,7 +79,7 @@ describe('Group 页面 · 分组编辑窗口', () => {
 
   it('底部提示与关闭按钮存在', () => {
     const { wrapper } = ctx;
-    expect(wrapper.find('.tips-text').text()).toContain('可拖动分组或股票进行排序');
+    expect(wrapper.find('.tips-text').text()).toContain('调整概念顺序');
     expect(wrapper.find('#titlebar-close').exists()).toBe(true);
   });
 });

@@ -464,6 +464,8 @@ onMounted(async () => {
   applyDragRegion(['el-table__cell', 'cell', 'el-table__empty-block', 'el-table__empty-text']);
 
   offs.push(await on('stateChange', () => {
+    // 其他窗口写库后同步了 localStorage 快照，这里重新读取以拿到最新自选
+    monitor.$hydrate({ runHooks: false });
     hideMenu();
     reload();
     ensureMacd();

@@ -33,7 +33,6 @@ describe('cache store · 两级概念', () => {
       name: '板块',
       id: 3,
       id_str: '3',
-      editable: true,
       symbols: [],
       children: [],
     });
@@ -46,7 +45,7 @@ describe('cache store · 两级概念', () => {
     expect(cache.group).toHaveLength(2);
   });
 
-  it('默认自选（editable=false）不能增加二级概念', () => {
+  it('自选（id=0）不能增加二级概念', () => {
     expect(cache.addSubConcept(0, '白酒2')).toBe(false);
     expect(cache.group[0].children).toEqual([]);
   });
@@ -57,16 +56,68 @@ describe('cache store · 两级概念', () => {
     expect(cache.group[1].children[1].id_str).toBe('3');
   });
 
+  it('二级概念同一一级概念下不可重名，不同一级概念之间可以重名', () => {
+    expect(cache.addSubConcept(1, '白酒')).toBe(false);
+    expect(cache.group[1].children).toHaveLength(1);
+
+    cache.group.push(concept(3, '板块'));
+    expect(cache.addSubConcept(3, '白酒')).toBe(true);
+    expect(cache.group[2].children.map((c) => c.name)).toEqual(['白酒']);
+  });
+
+  it('moveSubConceptToParent 把二级概念移动到另一个一级概念末尾', () => {
+    cache.group.push(concept(3, '板块', [], [concept(4, '水泥')]));
+    expect(cache.moveSubConceptToParent(2, 3)).toBe(true);
+    expect(cache.group[2].children.map((c) => c.id)).toEqual([4, 2]);
+    expect(cache.group[1].children).toEqual([]);
+    expect(cache.moveSubConceptToParent(2, 0)).toBe(false);
+    expect(cache.moveSubConceptToParent(999, 3)).toBe(false);
+  });
+
+  it('moveSubConceptToParent 目标已有同名二级概念时不移动', () => {
+    cache.group.push(concept(3, '板块', [], [concept(4, '白酒')]));
+    expect(cache.moveSubConceptToParent(2, 3)).toBe(false);
+    expect(cache.group[1].children.map((c) => c.id)).toEqual([2]);
+  });
+
   it('二级概念不能再挂三级（最多两级）', () => {
     expect(cache.addSubConcept(2, '三级')).toBe(false);
     expect(cache.findConceptById(2).children || []).toHaveLength(0);
   });
 
-  it('changeGroupName 支持二级概念，重名不生效', () => {
+  it('moveConcept 调整一级概念顺序，自选固定在最前', () => {
+    cache.group.push(concept(3, '板块'));
+    expect(cache.moveConcept(1, -1)).toBe(false);
+    expect(cache.moveConcept(3, -1)).toBe(true);
+    expect(cache.group.map((g) => g.id)).toEqual([0, 3, 1]);
+    expect(cache.moveConcept(1, 1)).toBe(false);
+  });
+
+  it('moveSubConcept 只在所属一级概念内调整二级顺序', () => {
+    cache.group[1].children.push(concept(3, '啤酒'));
+    expect(cache.moveSubConcept(1, 3, -1)).toBe(true);
+    expect(cache.group[1].children.map((c) => c.id)).toEqual([3, 2]);
+    expect(cache.moveSubConcept(1, 3, -1)).toBe(false);
+    expect(cache.moveSubConcept(1, 2, -1)).toBe(true);
+    expect(cache.group[1].children.map((c) => c.id)).toEqual([2, 3]);
+    expect(cache.moveSubConcept(999, 2, 1)).toBe(false);
+  });
+
+  it('changeGroupName 重命名二级概念：同组重名不生效，跨一级概念允许重名', () => {
+    cache.group.push(concept(3, '板块', [], [concept(4, '水泥')]));
     cache.changeGroupName(2, '白酒改');
     expect(cache.findConceptById(2).name).toBe('白酒改');
-    cache.changeGroupName(2, '行业');
+
+    cache.group[1].children.push(concept(5, '啤酒'));
+    cache.changeGroupName(2, '啤酒');
     expect(cache.findConceptById(2).name).toBe('白酒改');
+
+    cache.changeGroupName(2, '水泥');
+    expect(cache.findConceptById(2).name).toBe('水泥');
+    expect(cache.findConceptById(4).name).toBe('水泥');
+
+    cache.changeGroupName(1, '水泥');
+    expect(cache.findConceptById(1).name).toBe('行业');
   });
 
   it('deleteGroup 删除一级概念会连带删除其二级概念', () => {
@@ -91,7 +142,7 @@ describe('cache store · 两级概念', () => {
     expect(cache.selectGroup).toBe(2);
   });
 
-  it('addSymbol / delSymbol 按概念名命中二级概念', () => {
+  it('addSymbol 按概念名命中二级概念，delSymbol 按概念 id 命中', () => {
     const zs = stock('600036');
     cache.addSymbol(zs, '白酒');
     expect(cache.findConceptByName('白酒').symbols.map((s) => s.symbol)).toEqual([
@@ -100,8 +151,15 @@ describe('cache store · 两级概念', () => {
     ]);
     cache.addSymbol(zs, '白酒');
     expect(cache.findConceptByName('白酒').symbols).toHaveLength(2);
-    cache.delSymbol(zs, '白酒');
-    expect(cache.findConceptByName('白酒').symbols.map((s) => s.symbol)).toEqual(['000858']);
+    cache.delSymbol(zs, 2);
+    expect(cache.findConceptById(2).symbols.map((s) => s.symbol)).toEqual(['000858']);
+  });
+
+  it('不同一级概念下有同名二级概念时，删除只作用于指定 id 的概念', () => {
+    cache.group.push(concept(3, '板块', [], [concept(4, '白酒', [stock('601318')])]));
+    cache.deleteSymbols([stock('601318')], 4);
+    expect(cache.findConceptById(4).symbols).toEqual([]);
+    expect(cache.findConceptById(2).symbols.map((s) => s.symbol)).toEqual(['000858']);
   });
 
   it('copySymbols 把股票复制到目标二级概念', () => {
@@ -126,9 +184,9 @@ describe('cache store · 两级概念', () => {
   });
 
   it('deleteSymbols 批量删除', () => {
-    cache.findConceptByName('白酒').symbols.push(stock('600036'), stock('601318'));
-    cache.deleteSymbols([stock('000858'), stock('600036')], '白酒');
-    expect(cache.findConceptByName('白酒').symbols.map((s) => s.symbol)).toEqual(['601318']);
+    cache.findConceptById(2).symbols.push(stock('600036'), stock('601318'));
+    cache.deleteSymbols([stock('000858'), stock('600036')], 2);
+    expect(cache.findConceptById(2).symbols.map((s) => s.symbol)).toEqual(['601318']);
   });
 });
 

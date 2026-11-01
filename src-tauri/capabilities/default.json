@@ -31,6 +31,7 @@
       "allow": [
         { "url": "https://searchadapter.eastmoney.com/*" },
         { "url": "https://*.eastmoney.com/*" },
+        { "url": "https://proxy.finance.qq.com/*" },
         { "url": "https://legulegu.com/*" },
         { "url": "https://*.10jqka.com.cn/*" }
       ]

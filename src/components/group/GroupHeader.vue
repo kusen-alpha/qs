@@ -20,7 +20,7 @@
       </h6>
     </el-col>
     <el-col :span="8" />
-    <el-col :span="6">
+    <el-col :span="6" class="header-ops">
       <el-tooltip
         effect="customized"
         placement="bottom"
@@ -30,7 +30,7 @@
       >
         <el-button
           type="primary"
-          :disabled="!current.editable"
+          :disabled="!canEdit"
           size="default"
           :icon="EditIcon"
           circle
@@ -40,11 +40,25 @@
       <el-tooltip effect="customized" content="删除分组" :offset="-3">
         <el-button
           type="danger"
-          :disabled="!current.editable"
+          :disabled="!canEdit"
           size="default"
           :icon="DeleteIcon"
           circle
           @click="deleteVisible = true"
+        />
+      </el-tooltip>
+      <el-tooltip
+        v-if="isSub"
+        effect="customized"
+        content="移动到其他概念"
+        :offset="-3"
+      >
+        <el-button
+          type="primary"
+          size="default"
+          :icon="MoveIcon"
+          circle
+          @click="openMove"
         />
       </el-tooltip>
     </el-col>
@@ -64,10 +78,35 @@
       </span>
     </template>
   </el-dialog>
+
+  <el-dialog
+    v-model="moveVisible"
+    title="移动概念"
+    class="item-change-dialog"
+    width="60%"
+  >
+    <p>将 <b>{{ current.name }}</b> 移动到一级概念</p>
+    <el-select v-model="moveTarget" placeholder="请选择一级概念" style="width: 100%">
+      <el-option
+        v-for="group in moveTargets"
+        :key="group.id"
+        :label="group.name"
+        :value="group.id"
+      />
+    </el-select>
+    <p v-if="!moveTargets.length" class="move-empty">暂无可移动的一级概念</p>
+    <template #footer>
+      <span class="dialog-footer">
+        <el-button @click="moveVisible = false">取消</el-button>
+        <el-button type="primary" @click="confirmMove">确认</el-button>
+      </span>
+    </template>
+  </el-dialog>
 </template>
 
 <script setup>
 import { computed, h, nextTick, ref } from 'vue';
+import { ElMessage } from 'element-plus';
 import { useCacheStore } from '../../stores/cache';
 import GroupDeleteDialog from './GroupDeleteDialog.vue';
 
@@ -78,7 +117,20 @@ const newName = ref('');
 const deleteVisible = ref(false);
 const inputRef = ref();
 
+const moveVisible = ref(false);
+const moveTarget = ref(null);
+
 const current = computed(() => cache.findConceptById(cache.selectGroup) || {});
+/* 自选（id=0）是固定分组，不允许重命名 / 删除；未选中任何概念时同样禁用 */
+const canEdit = computed(() => Boolean(current.value.id) && current.value.id !== 0);
+/* 二级概念才允许移动到其他一级概念 */
+const parentConcept = computed(() => cache.parentConceptOf(current.value.id));
+const isSub = computed(() => Boolean(parentConcept.value));
+const moveTargets = computed(() =>
+  cache.group.filter(
+    (group) => group.id !== 0 && group.id !== parentConcept.value?.id,
+  ),
+);
 
 const EditIcon = () =>
   h(
@@ -100,6 +152,18 @@ const DeleteIcon = () =>
       h('path', {
         fill: 'currentColor',
         d: 'M352 192V95.936a32 32 0 0 1 32-32h256a32 32 0 0 1 32 32V192h256a32 32 0 1 1 0 64H96a32 32 0 0 1 0-64h256zm64 0h192v-64H416v64zM192 960a32 32 0 0 1-32-32V256h704v672a32 32 0 0 1-32 32H192zm224-192a32 32 0 0 0 32-32V416a32 32 0 0 0-64 0v320a32 32 0 0 0 32 32zm192 0a32 32 0 0 0 32-32V416a32 32 0 0 0-64 0v320a32 32 0 0 0 32 32z',
+      }),
+    ],
+  );
+
+const MoveIcon = () =>
+  h(
+    'svg',
+    { xmlns: 'http://www.w3.org/2000/svg', viewBox: '0 0 1024 1024' },
+    [
+      h('path', {
+        fill: 'currentColor',
+        d: 'M160 448h448v128H160zM608 288 896 512 608 736z',
       }),
     ],
   );
@@ -136,9 +200,54 @@ function confirmDelete() {
   cache.deleteGroup(current.value.id);
   deleteVisible.value = false;
 }
+
+function openMove() {
+  moveTarget.value = null;
+  moveVisible.value = true;
+}
+
+function confirmMove() {
+  if (moveTarget.value == null) {
+    ElMessage.warning({
+      message: '请选择目标一级概念',
+      duration: 1500,
+    });
+    return;
+  }
+  if (!cache.moveSubConceptToParent(current.value.id, moveTarget.value)) {
+    ElMessage.error({
+      message: '目标概念下已存在同名二级概念',
+      type: 'error',
+      duration: 2000,
+    });
+    return;
+  }
+  ElMessage.success({
+    message: '移动成功',
+    type: 'success',
+    duration: 1200,
+  });
+  moveVisible.value = false;
+}
 </script>
 
 <style scoped>
+/* 右侧三个操作按钮整体左移，避开标题栏右上角的最大化 / 关闭按钮；
+   用 flex 单行右对齐，避免按钮被挤到第二行 */
+.header-ops {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: nowrap;
+  padding-right: 50px;
+}
+.header-ops :deep(.el-button) {
+  flex: none;
+  margin-left: 8px;
+}
+.header-ops :deep(.el-button:first-child) {
+  margin-left: 0;
+}
 /* .el-input__inner 的样式在 app.css 中来自分组菜单的输入框，会串入本页的重命名输入框。 */
 .input-new-tag .el-input__inner {
   width: 100% !important;

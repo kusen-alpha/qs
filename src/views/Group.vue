@@ -12,7 +12,7 @@
           <GroupItems />
         </el-main>
         <el-footer height="40px" class="group-footer">
-          <p class="tips-text">*可拖动分组或股票进行排序</p>
+          <p class="tips-text">*可用左侧菜单的 ↑↓ 调整概念顺序，点「保存」后生效</p>
           <el-button
             type="primary"
             size="default"
@@ -22,6 +22,7 @@
         </el-footer>
       </el-container>
     </el-container>
+    <WindowMaxButton />
     <el-button
       class="close-button"
       type="info"
@@ -54,6 +55,7 @@ import { ElMessage } from 'element-plus';
 import GroupMenu from '../components/group/GroupMenu.vue';
 import GroupHeader from '../components/group/GroupHeader.vue';
 import GroupItems from '../components/group/GroupItems.vue';
+import WindowMaxButton from '../components/WindowMaxButton.vue';
 import { useMonitorStore } from '../stores/monitor';
 import { useCacheStore } from '../stores/cache';
 import { MonitorEvent } from '../constants';
@@ -67,11 +69,9 @@ function loadGroups() {
   const groups = JSON.parse(JSON.stringify(monitor.watchGroup));
   for (const group of groups) {
     group.id_str = String(group.id);
-    group.editable = group.id !== 0;
     group.children = (group.children || []).map((child) => ({
       ...child,
       id_str: String(child.id),
-      editable: true,
       symbols: child.symbols || [],
     }));
   }

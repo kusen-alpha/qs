@@ -8,6 +8,7 @@ const { stub } = vi.hoisted(() => ({
 vi.mock('@/views/Group.vue', () => stub('GroupStub'));
 vi.mock('@/views/Setting.vue', () => stub('SettingStub'));
 vi.mock('@/views/Monitor.vue', () => stub('MonitorStub'));
+vi.mock('@/views/BoardChart.vue', () => stub('BoardChartStub'));
 
 async function goto(path) {
   const app = document.createElement('div');
@@ -33,12 +34,14 @@ describe('router · 路由表', () => {
       ['/setting', 'setting'],
       ['/group', 'group'],
       ['/market', 'market'],
+      ['/boardchart', 'boardChart'],
     ]);
   });
 
   it('导航后按页面给 #app 打上样式前缀 class', async () => {
     expect((await goto('/group')).className).toBe('page-group');
     expect((await goto('/setting')).className).toBe('page-setting');
+    expect((await goto('/boardchart')).className).toBe('page-detail');
     expect((await goto('/')).className).toBe('page-main');
   });
 });

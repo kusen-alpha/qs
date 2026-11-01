@@ -40,6 +40,13 @@ export const useCacheStore = defineStore('cache', {
     findConceptByName(name) {
       return this.allConcepts().find((group) => group.name === name) || null;
     },
+    /** 二级概念所属的一级概念；一级概念或未知 id 返回 null */
+    parentConceptOf(id) {
+      return (
+        this.group.find((group) => (group.children || []).some((child) => child.id == id)) ||
+        null
+      );
+    },
     nextConceptId() {
       let maxId = 0;
       for (const group of this.allConcepts()) {
@@ -55,30 +62,69 @@ export const useCacheStore = defineStore('cache', {
         name,
         id,
         id_str: String(id),
-        editable: true,
         symbols: [],
         children: [],
       });
       return true;
     },
-    /** 在指定一级概念下新增二级概念 */
+    /** 在指定一级概念下新增二级概念（自选 id=0 不是概念，不挂二级） */
     addSubConcept(parentId, name) {
       const parent = this.group.find((group) => group.id == parentId);
-      if (!parent || parent.editable === false) return false;
-      if (this.findConceptByName(name)) return false;
+      if (!parent || parent.id == 0) return false;
+      // 二级概念只在同一一级概念下保持唯一，不同一级概念之间允许重名
+      if ((parent.children || []).some((child) => child.name === name)) return false;
       if (!parent.children) parent.children = [];
       const id = this.nextConceptId();
       parent.children.push({
         name,
         id,
         id_str: String(id),
-        editable: true,
         symbols: [],
       });
       return true;
     },
+    /** 上移/下移一级概念：自选固定在最前，不参与排序；返回是否发生移动 */
+    moveConcept(id, offset) {
+      const idx = this.group.findIndex((group) => group.id == id);
+      const target = idx + offset;
+      if (idx < 1 || target < 1 || target >= this.group.length) return false;
+      const list = this.group;
+      [list[idx], list[target]] = [list[target], list[idx]];
+      return true;
+    },
+    /** 上移/下移某个一级概念下的二级概念；返回是否发生移动 */
+    moveSubConcept(parentId, subId, offset) {
+      const parent = this.group.find((group) => group.id == parentId);
+      if (!parent || !parent.children) return false;
+      const idx = parent.children.findIndex((child) => child.id == subId);
+      const target = idx + offset;
+      if (idx < 0 || target < 0 || target >= parent.children.length) return false;
+      const list = parent.children;
+      [list[idx], list[target]] = [list[target], list[idx]];
+      return true;
+    },
+    /** 把二级概念移动到另一个一级概念下（追加到末尾）；目标已有同名二级概念时失败 */
+    moveSubConceptToParent(subId, parentId) {
+      const source = this.parentConceptOf(subId);
+      const target = this.group.find((group) => group.id == parentId);
+      if (!source || !target || target.id == 0 || source.id == target.id) return false;
+      const child = source.children.find((item) => item.id == subId);
+      if (!child) return false;
+      if ((target.children || []).some((item) => item.name === child.name)) return false;
+      source.children = source.children.filter((item) => item.id != subId);
+      if (!target.children) target.children = [];
+      target.children.push(child);
+      return true;
+    },
+    /** 重命名概念：一级概念全局唯一，二级概念只与同一一级概念下的兄弟重名冲突 */
     changeGroupName(id, name) {
-      if (this.findConceptByName(name)) return;
+      const parent = this.parentConceptOf(id);
+      const duplicated = parent
+        ? (parent.children || []).some(
+            (child) => child.id != id && child.name === name,
+          )
+        : this.allConcepts().some((concept) => concept.id != id && concept.name === name);
+      if (duplicated) return;
       const group = this.findConceptById(id);
       if (group) group.name = name;
     },
@@ -89,8 +135,8 @@ export const useCacheStore = defineStore('cache', {
         group.symbols = [...new Set(group.symbols)];
       }
     },
-    delSymbol(symbol, groupName) {
-      const group = this.findConceptByName(groupName);
+    delSymbol(symbol, groupId) {
+      const group = this.findConceptById(groupId);
       if (group) {
         group.symbols = group.symbols.filter((s) => s.symbol !== symbol.symbol);
       }
@@ -113,8 +159,8 @@ export const useCacheStore = defineStore('cache', {
       }
       return added;
     },
-    deleteSymbols(symbols, from) {
-      symbols.forEach((s) => this.delSymbol(s, from));
+    deleteSymbols(symbols, groupId) {
+      symbols.forEach((s) => this.delSymbol(s, groupId));
     },
     deleteGroup(id) {
       const remove = (nodes) => {

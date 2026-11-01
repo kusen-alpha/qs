@@ -16,11 +16,25 @@
               <ExpandIcon v-if="group.children && group.children.length" />
             </span>
             <span class="concept-name">{{ group.name }}</span>
+            <span v-if="group.id !== 0" class="move-buttons">
+              <el-button
+                link
+                class="move-btn"
+                :disabled="!canMoveGroup(group, -1)"
+                @click.stop="moveGroup(group, -1)"
+              >↑</el-button>
+              <el-button
+                link
+                class="move-btn"
+                :disabled="!canMoveGroup(group, 1)"
+                @click.stop="moveGroup(group, 1)"
+              >↓</el-button>
+            </span>
             <el-tag type="info" size="small" class="menu-count-tag" effect="light" round>
               {{ group.symbols.length }}
             </el-tag>
             <el-button
-              v-if="group.editable !== false"
+              v-if="group.id !== 0"
               class="add-sub-button"
               link
               :icon="PlusIcon"
@@ -49,6 +63,20 @@
               data-draggable="true"
             >
               <span class="concept-name">{{ child.name }}</span>
+              <span class="move-buttons">
+                <el-button
+                  link
+                  class="move-btn"
+                  :disabled="!canMoveSub(group, child, -1)"
+                  @click.stop="moveSub(group, child, -1)"
+                >↑</el-button>
+                <el-button
+                  link
+                  class="move-btn"
+                  :disabled="!canMoveSub(group, child, 1)"
+                  @click.stop="moveSub(group, child, 1)"
+                >↓</el-button>
+              </span>
               <el-tag type="info" size="small" class="menu-count-tag" effect="light" round>
                 {{ child.symbols.length }}
               </el-tag>
@@ -115,6 +143,29 @@
   color: var(--el-color-primary);
   font-size: 15px;
 }
+/* 排序按钮：平时隐藏，悬停菜单项时出现，避免挤占名称宽度 */
+.move-buttons {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  visibility: hidden;
+}
+.concept-item:hover .move-buttons,
+.sub-item:hover .move-buttons,
+.move-buttons:focus-within {
+  visibility: visible;
+}
+.move-btn {
+  min-width: 0;
+  height: auto;
+  padding: 0 2px;
+  font-size: 15px;
+  line-height: 1;
+  color: #909399;
+}
+.move-btn + .move-btn {
+  margin-left: 0;
+}
 .sub-item,
 .sub-item.is-active {
   /* 一级名称左侧多了 16px 展开箭头，二级同步右移，保持 16px 缩进 */
@@ -146,7 +197,7 @@
 </style>
 
 <script setup>
-import { h, nextTick, onMounted, ref } from 'vue';
+import { h, nextTick, ref, watch } from 'vue';
 import { ElMessage } from 'element-plus';
 import { useCacheStore } from '../../stores/cache';
 
@@ -205,6 +256,29 @@ function parentOfConcept(id) {
   );
 }
 
+/* 一级概念排序：自选固定在最前，只在其后的一级概念间移动 */
+function canMoveGroup(group, offset) {
+  const idx = cache.group.findIndex((item) => item.id == group.id);
+  const target = idx + offset;
+  return idx > 0 && target > 0 && target < cache.group.length;
+}
+
+function moveGroup(group, offset) {
+  cache.moveConcept(group.id, offset);
+}
+
+/* 二级概念排序：仅在所属一级概念内部移动 */
+function canMoveSub(group, child, offset) {
+  const list = group.children || [];
+  const idx = list.findIndex((item) => item.id == child.id);
+  const target = idx + offset;
+  return idx >= 0 && target >= 0 && target < list.length;
+}
+
+function moveSub(group, child, offset) {
+  cache.moveSubConcept(group.id, child.id, offset);
+}
+
 function onSelect(index) {
   const id = Number(index);
   const parent = parentOfConcept(id);
@@ -219,10 +293,14 @@ function onSelect(index) {
   expandedId.value = expandedId.value === id ? null : id;
 }
 
-onMounted(() => {
-  const parent = parentOfConcept(cache.selectGroup);
-  if (parent) expandedId.value = parent.id;
-});
+/* 选中二级概念时展开其所属一级概念；移动到其他一级概念后也会自动跟着展开 */
+watch(
+  () => parentOfConcept(cache.selectGroup)?.id ?? null,
+  (parentId) => {
+    if (parentId) expandedId.value = parentId;
+  },
+  { immediate: true },
+);
 
 function startAdd() {
   adding.value = true;

@@ -2,6 +2,7 @@
   <el-card class="bg-card">
     <div class="common-layout">
       <Search />
+      <WindowMaxButton :size="30" :right="36" background="#f2f2f2" />
       <el-button
         class="close-button"
         type="info"
@@ -20,6 +21,7 @@
 import { onMounted } from 'vue';
 import { Close } from '@element-plus/icons-vue';
 import Search from '../components/editor/Search.vue';
+import WindowMaxButton from '../components/WindowMaxButton.vue';
 import { applyDragRegion } from '../utils/layout';
 import { closeWindow, WindowConfigs } from '../utils/windows';
 

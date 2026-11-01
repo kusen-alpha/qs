@@ -1,4 +1,5 @@
 import { request } from '../utils/http';
+import { saveQuotes } from '../utils/db';
 
 const HEADERS = {
   Host: 'push2.eastmoney.com',
@@ -49,6 +50,7 @@ export class EastmoneyApi {
       position_value: '-',
       position_profit: '-',
       position_profit_rate: '-',
+      amount: a.f6,
       open: a.f17,
       pre_close: a.f18,
     }));
@@ -77,7 +79,10 @@ export class EastmoneyApi {
       { method: 'GET', headers: this.headers },
     );
     if (res.ok && res.data && res.data.data) {
-      return this.processRealtimeData(res.data.data.diff);
+      const list = this.processRealtimeData(res.data.data.diff);
+      // 每轮刷新都写库；失败不影响行情展示
+      saveQuotes(list);
+      return list;
     }
     return [];
   }

@@ -43,6 +43,7 @@
       </template>
       <p v-else-if="!loading" class="mw-empty">{{ error || '暂无数据' }}</p>
     </div>
+    <WindowMaxButton />
     <el-button class="mw-close" type="info" size="small" id="titlebar-close" @click="close">
       <el-icon class="el-icon">
         <svg xmlns="http://www.w3.org/2000/svg" width="1em" height="1em" viewBox="0 0 24 24" class="el-icon">
@@ -59,6 +60,7 @@
 <script setup>
 import { nextTick, onMounted, onUnmounted, ref } from 'vue';
 import { loadMarketWidth } from '../api/legulegu';
+import WindowMaxButton from '../components/WindowMaxButton.vue';
 import { isTauri } from '../utils/env';
 
 const loading = ref(false);
@@ -120,19 +122,36 @@ async function fitWindowSize() {
   const table = tableRef.value;
   if (!body || !dates || !table) return;
   const bottomPadding = 6;
+  /* 窗口变窄出现横向滚动条时会占去 8px，预先留出，避免最后一行被裁掉 */
+  const scrollbarHeight = 8;
   const height = Math.ceil(
     body.getBoundingClientRect().top +
       dates.getBoundingClientRect().height +
       rows.value.length * 24 +
       bottomPadding +
+      scrollbarHeight +
       2,
   );
   const rect = table.getBoundingClientRect();
-  const gridWidth = 92 + columns.value.length * 24;
+  /* 默认宽度按 30 个交易日开窗，历史列更多时由横向滚动条查看，避免窗口过宽 */
+  const VISIBLE_DAYS = 30;
+  const visibleDays = Math.min(columns.value.length, VISIBLE_DAYS);
+  const gridWidth = 92 + visibleDays * 24;
   const rightInset = window.innerWidth - rect.right;
-  const width = Math.ceil(rect.left + gridWidth + rightInset);
-  const { getCurrentWindow, LogicalSize } = await import('@tauri-apps/api/window');
-  await getCurrentWindow().setSize(new LogicalSize(width, height));
+  const desiredWidth = Math.ceil(rect.left + gridWidth + rightInset);
+  const maxWidth = Math.max(320, window.screen.availWidth - 20);
+  const maxHeight = Math.max(240, window.screen.availHeight - 20);
+  const width = Math.min(desiredWidth, maxWidth);
+  const finalHeight = Math.min(height, maxHeight);
+  const { getCurrentWindow, LogicalSize, LogicalPosition } = await import('@tauri-apps/api/window');
+  const win = getCurrentWindow();
+  const scale = await win.scaleFactor();
+  const pos = await win.outerPosition();
+  await win.setSize(new LogicalSize(width, finalHeight));
+  /* 放大后若右侧/底部超出屏幕，把窗口移回可见范围 */
+  const x = Math.min(Math.max(0, pos.x / scale), Math.max(0, window.screen.availWidth - width));
+  const y = Math.min(Math.max(0, pos.y / scale), Math.max(0, window.screen.availHeight - finalHeight));
+  await win.setPosition(new LogicalPosition(x, y));
 }
 
 onUnmounted(() => {
@@ -149,13 +168,14 @@ async function load() {
     rows.value = [...average, ...data.rows.filter((row) => row.name !== '行业平均')];
     /* 接口按日期升序返回，最右侧为最新交易日 */
     columns.value = data.dates.map((date, index) => ({ date, index }));
-    await scrollToLatest();
   } catch (e) {
     rows.value = [];
     error.value = e.message || '市场宽度数据获取失败';
   } finally {
     loading.value = false;
+    /* 先按屏幕宽度定窗口大小，再滚到最右侧，避免尺寸变化后定位偏移 */
     await fitWindowSize();
+    if (rows.value.length) await scrollToLatest();
   }
 }
 
@@ -241,9 +261,20 @@ async function close() {
   overflow-y: hidden;
   background-color: #f2f2f2;
 }
+/* 纵向不滚动，保留横向滚动条：窗口宽度不足以放下全部交易日时可拖动查看 */
 .mw-table::-webkit-scrollbar {
   width: 0;
-  height: 0;
+  height: 8px;
+}
+.mw-table::-webkit-scrollbar-track {
+  background: transparent;
+}
+.mw-table::-webkit-scrollbar-thumb {
+  background-color: #c8c9cc;
+  border-radius: 4px;
+}
+.mw-table::-webkit-scrollbar-thumb:hover {
+  background-color: #a8abb2;
 }
 .mw-track {
   display: inline-block;

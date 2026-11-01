@@ -144,15 +144,13 @@ function makeRow(concept, symbols, isChild, hasChildren) {
 }
 
 /* 一级概念默认收缩：只展开当前 expandedId 对应的二级概念；
-   自选（id 0）固定第一位，其余一级概念按表头排序 */
+   自选（id 0）不在概念列表展示，其余一级概念按表头排序 */
 const rows = computed(() => {
-  const watch = monitor.watchGroup.find((group) => group.id == 0) || null;
-  const rest = monitor.watchGroup.filter((group) => group !== watch);
-  if (sortKey.value) rest.sort(compareConcepts);
-  const ordered = watch ? [watch, ...rest] : rest;
+  const list = monitor.watchGroup.filter((group) => Number(group.id) !== 0);
+  if (sortKey.value) list.sort(compareConcepts);
 
   const out = [];
-  for (const group of ordered) {
+  for (const group of list) {
     const children = group.children || [];
     const symbols = children.length
       ? children.flatMap((child) => child.symbols || [])
@@ -192,9 +190,14 @@ function onSortChange({ prop, order }) {
   sortOrder.value = order;
 }
 
+/* 概念列表不展示自选，行情与 MACD 也只取概念下的股票 */
+const conceptGroups = computed(() =>
+  monitor.watchGroup.filter((group) => Number(group.id) !== 0),
+);
+
 const realtimeSymbols = computed(() => {
   const out = [];
-  for (const group of monitor.watchGroup) {
+  for (const group of conceptGroups.value) {
     for (const s of group.symbols || []) out.push(s);
     for (const child of group.children || []) {
       for (const s of child.symbols || []) out.push(s);
@@ -206,7 +209,7 @@ const realtimeSymbols = computed(() => {
 /* MACD 用日 K，不区分行情数据源 */
 const macdSymbols = computed(() => {
   const out = [];
-  for (const group of monitor.watchGroup) {
+  for (const group of conceptGroups.value) {
     for (const s of group.symbols || []) out.push(s.secid);
     for (const child of group.children || []) {
       for (const s of child.symbols || []) out.push(s.secid);

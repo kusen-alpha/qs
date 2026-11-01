@@ -41,8 +41,14 @@ describe('Iconbar · 底部图标栏', () => {
     expect(wrapper.find('.profit').exists()).toBe(true);
   });
 
-  it('概念 tab：只有设置 / 添加，没有图表与盈亏', () => {
+  it('概念 tab：设置 / 添加 / 图表 三个按钮，没有盈亏区', () => {
     const { wrapper } = mountBar('concept');
+    expect(wrapper.findAll('.buttons')).toHaveLength(3);
+    expect(wrapper.find('.profit').exists()).toBe(false);
+  });
+
+  it('板块 tab：设置 / 图表 两个按钮，没有添加与盈亏区', () => {
+    const { wrapper } = mountBar('sector');
     expect(wrapper.findAll('.buttons')).toHaveLength(2);
     expect(wrapper.find('.profit').exists()).toBe(false);
   });
@@ -84,5 +90,15 @@ describe('Iconbar · 底部图标栏', () => {
     const { wrapper } = mountBar('concept');
     await wrapper.findAll('.buttons')[1].trigger('click');
     expect(openWindow).toHaveBeenLastCalledWith(WindowConfigs.group);
+  });
+
+  it('概念/板块 tab 的图表按钮打开对应类型的板块图表窗口', async () => {
+    const concept = mountBar('concept');
+    await concept.wrapper.findAll('.buttons')[2].trigger('click');
+    expect(openWindow).toHaveBeenLastCalledWith(WindowConfigs.boardChart, { kind: 'concept' });
+
+    const sector = mountBar('sector');
+    await sector.wrapper.findAll('.buttons')[1].trigger('click');
+    expect(openWindow).toHaveBeenLastCalledWith(WindowConfigs.boardChart, { kind: 'sector' });
   });
 });

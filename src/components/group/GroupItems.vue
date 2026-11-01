@@ -18,7 +18,6 @@
     <el-table-column v-if="showToolbar" type="selection" width="55" />
     <el-table-column prop="name" label="名称" width="180" />
     <el-table-column prop="symbol" label="代码" width="100" />
-    <el-table-column prop="exchange" label="类别" width="100" />
     <el-table-column v-if="showToolbar" label="操作" width="100">
       <template #default="{ row }">
         <el-button link type="primary" size="small" @click="deleteOne(row)">删除</el-button>
@@ -166,13 +165,13 @@ function clearSelection() {
 }
 
 function confirmDelete() {
-  cache.deleteSymbols(selected.value, currentGroup.value.name);
+  cache.deleteSymbols(selected.value, currentGroup.value.id);
   clearSelection();
   dialogVisible.value = false;
 }
 
 function deleteOne(row) {
-  cache.deleteSymbols([row], currentGroup.value.name);
+  cache.deleteSymbols([row], currentGroup.value.id);
   clearSelection();
 }
 

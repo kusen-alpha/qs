@@ -44,7 +44,7 @@
             />
           </el-tooltip>
         </template>
-        <template v-if="isWatch">
+        <template v-if="showChart">
           <el-tooltip effect="customized" content="图表" :offset="-2">
             <el-button
               class="buttons"
@@ -96,12 +96,13 @@ import { openWindow, WindowConfigs } from '../../utils/windows';
 import { formatAmount, formatRate } from '../../api/eastmoney';
 
 const props = defineProps({
-  // 当前 tab：watch 显示添加/图表/总盈亏，concept 只显示添加（打开概念管理窗口）
+  // 当前 tab：watch 显示添加/图表/总盈亏，concept 显示添加/图表，sector 只显示图表
   tab: { type: String, default: 'watch' },
 });
 
 const isWatch = computed(() => props.tab === 'watch');
 const showAdd = computed(() => props.tab === 'watch' || props.tab === 'concept');
+const showChart = computed(() => ['watch', 'concept', 'sector'].includes(props.tab));
 
 const cache = useCacheStore();
 const setting = useSettingStore();
@@ -132,7 +133,11 @@ function openSearch() {
   openWindow(WindowConfigs.search);
 }
 function openChart() {
-  openWindow(WindowConfigs.detail);
+  if (isWatch.value) {
+    openWindow(WindowConfigs.detail);
+  } else {
+    openWindow(WindowConfigs.boardChart, { kind: props.tab });
+  }
 }
 function openSetting() {
   openWindow(WindowConfigs.setting);

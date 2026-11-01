@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it } from 'vitest';
+import { nextTick } from 'vue';
 import { mount } from '@vue/test-utils';
 import ElementPlus from 'element-plus';
 import GroupHeader from '@/components/group/GroupHeader.vue';
@@ -39,7 +40,7 @@ describe('GroupHeader · 选中概念头部', () => {
     expect(cache.findConceptById(2).name).toBe('白酒改');
   });
 
-  it('自选（editable=false）的重命名 / 删除按钮禁用', () => {
+  it('自选（id=0）的重命名 / 删除按钮禁用', () => {
     const { wrapper } = mountHeader(0);
     const buttons = wrapper.findAll('button');
     expect(buttons[0].attributes('disabled')).toBeDefined();
@@ -54,5 +55,51 @@ describe('GroupHeader · 选中概念头部', () => {
     await confirm.trigger('click');
     expect(cache.group[1].children).toEqual([]);
     expect(cache.selectGroup).toBe(0);
+  });
+
+  it('二级概念在删除按钮右侧有移动按钮，一级概念没有', () => {
+    const sub = mountHeader(2);
+    expect(sub.wrapper.findAll('button')).toHaveLength(3);
+    // 三个操作按钮同属右侧操作列，整体左移以避开窗口最大化 / 关闭按钮
+    expect(sub.wrapper.find('.header-ops').findAll('button')).toHaveLength(3);
+
+    const top = mountHeader(1);
+    expect(top.wrapper.findAll('button')).toHaveLength(2);
+  });
+
+  it('移动弹窗里只能选其他一级概念，确认后二级概念挂到目标下', async () => {
+    const { wrapper, cache } = mountHeader(2);
+    cache.group.push(concept(3, '板块'));
+    await nextTick();
+
+    await wrapper.findAll('button')[2].trigger('click');
+    expect(wrapper.vm.moveVisible).toBe(true);
+    expect(wrapper.vm.moveTargets.map((g) => g.id)).toEqual([3]);
+
+    wrapper.vm.moveTarget = 3;
+    const confirm = wrapper
+      .findAll('.el-dialog button')
+      .find((b) => b.text().includes('确认'));
+    await confirm.trigger('click');
+
+    expect(cache.group[1].children).toEqual([]);
+    expect(cache.group[2].children.map((c) => c.name)).toEqual(['白酒']);
+    expect(wrapper.vm.moveVisible).toBe(false);
+  });
+
+  it('目标一级概念下已有同名二级概念时移动失败', async () => {
+    const { wrapper, cache } = mountHeader(2);
+    cache.group.push(concept(3, '板块', [], [concept(4, '白酒')]));
+    await nextTick();
+
+    await wrapper.findAll('button')[2].trigger('click');
+    wrapper.vm.moveTarget = 3;
+    const confirm = wrapper
+      .findAll('.el-dialog button')
+      .find((b) => b.text().includes('确认'));
+    await confirm.trigger('click');
+
+    expect(cache.group[1].children.map((c) => c.name)).toEqual(['白酒']);
+    expect(cache.group[2].children.map((c) => c.name)).toEqual(['白酒']);
   });
 });

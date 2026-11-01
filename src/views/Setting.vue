@@ -39,6 +39,7 @@
         </el-main>
       </el-container>
     </el-container>
+    <WindowMaxButton />
     <el-button
       class="close-button"
       type="info"
@@ -77,6 +78,7 @@ import { getCurrentWindow } from '@tauri-apps/api/window';
 import SettingMenu from '../components/setting/SettingMenu.vue';
 import SettingHeader from '../components/setting/SettingHeader.vue';
 import SettingMain from '../components/setting/SettingMain.vue';
+import WindowMaxButton from '../components/WindowMaxButton.vue';
 import { useSettingStore } from '../stores/setting';
 import { useCacheStore } from '../stores/cache';
 import { isTauri } from '../utils/env';

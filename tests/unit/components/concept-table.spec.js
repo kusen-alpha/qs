@@ -65,20 +65,20 @@ function clickConcept(wrapper, name) {
 }
 
 describe('ConceptTable · 概念列表', () => {
-  it('默认只展示一级概念，二级概念全部收缩', () => {
+  it('默认只展示一级概念（过滤自选），二级概念全部收缩', () => {
     const { wrapper } = mountTable();
-    expect(names(wrapper)).toEqual(['自选', '行业', '板块']);
+    expect(names(wrapper)).toEqual(['行业', '板块']);
   });
 
   it('点击一级概念展开其二级概念，再点一次收起', async () => {
     const { wrapper } = mountTable();
     clickConcept(wrapper, '行业');
     await nextTick();
-    expect(names(wrapper)).toEqual(['自选', '行业', '白酒', '啤酒', '板块']);
+    expect(names(wrapper)).toEqual(['行业', '白酒', '啤酒', '板块']);
 
     clickConcept(wrapper, '行业');
     await nextTick();
-    expect(names(wrapper)).toEqual(['自选', '行业', '板块']);
+    expect(names(wrapper)).toEqual(['行业', '板块']);
   });
 
   it('有且只能同时展开一个一级概念', async () => {
@@ -87,7 +87,7 @@ describe('ConceptTable · 概念列表', () => {
     await nextTick();
     clickConcept(wrapper, '板块');
     await nextTick();
-    expect(names(wrapper)).toEqual(['自选', '行业', '板块', '水泥']);
+    expect(names(wrapper)).toEqual(['行业', '板块', '水泥']);
   });
 
   it('一级概念展示其下所有二级概念股票的平均涨跌幅与平均换手率', async () => {
@@ -112,11 +112,10 @@ describe('ConceptTable · 概念列表', () => {
     expect(baijiu.turnText).toBe('4.00%');
   });
 
-  it('排序时自选固定第一位，其余一级概念按数值排序，二级随所属一级概念', async () => {
+  it('排序时一级概念按数值排序，二级随所属一级概念', async () => {
     const { wrapper } = mountTable();
     await flushPromises();
     wrapper.vm.quotes = [
-      { secid: '1.600519', range: 0.1, turn: 1 },
       { secid: '0.000858', range: 1.23, turn: 2 },
       { secid: '1.600036', range: 2.34, turn: 3 },
       { secid: '1.600600', range: 0.5, turn: 4 },
@@ -126,19 +125,19 @@ describe('ConceptTable · 概念列表', () => {
 
     wrapper.vm.onSortChange({ prop: 'range', order: 'descending' });
     await nextTick();
-    expect(names(wrapper)).toEqual(['自选', '板块', '行业']);
+    expect(names(wrapper)).toEqual(['板块', '行业']);
 
     clickConcept(wrapper, '行业');
     await nextTick();
-    expect(names(wrapper)).toEqual(['自选', '板块', '行业', '白酒', '啤酒']);
+    expect(names(wrapper)).toEqual(['板块', '行业', '白酒', '啤酒']);
 
     wrapper.vm.onSortChange({ prop: 'range', order: 'ascending' });
     await nextTick();
-    expect(names(wrapper)).toEqual(['自选', '行业', '白酒', '啤酒', '板块']);
+    expect(names(wrapper)).toEqual(['行业', '白酒', '啤酒', '板块']);
 
     wrapper.vm.onSortChange({ prop: 'range', order: null });
     await nextTick();
-    expect(names(wrapper)).toEqual(['自选', '行业', '白酒', '啤酒', '板块']);
+    expect(names(wrapper)).toEqual(['行业', '白酒', '啤酒', '板块']);
   });
 
   it('MACD 列按成分股每日平均柱的连续天数展示，并可排序', async () => {
@@ -148,8 +147,6 @@ describe('ConceptTable · 概念列表', () => {
     const days = (values) =>
       values.map((value, i) => ({ date: `2026-10-${String(i + 1).padStart(2, '0')}`, value }));
     macd.series = {
-      // 自选 +1
-      '1.600519': days([1]),
       // 白酒两只都是 -1 → -2；啤酒两只 -1 → 行业 -2
       '0.000858': days([-1, -1]),
       '1.600036': days([-1, -1]),
@@ -161,7 +158,6 @@ describe('ConceptTable · 概念列表', () => {
 
     const table = wrapper.findComponent({ name: 'ElTable' });
     const row = (name) => table.props('data').find((r) => r.name === name);
-    expect(row('自选').macdText).toBe('1');
     expect(row('行业').macdText).toBe('-2');
     expect(row('板块').macdText).toBe('2');
 
@@ -171,7 +167,7 @@ describe('ConceptTable · 概念列表', () => {
 
     wrapper.vm.onSortChange({ prop: 'macd', order: 'descending' });
     await nextTick();
-    expect(names(wrapper)).toEqual(['自选', '板块', '行业', '白酒', '啤酒']);
+    expect(names(wrapper)).toEqual(['板块', '行业', '白酒', '啤酒']);
   });
 
   it('没有行情时平均值显示 -', () => {

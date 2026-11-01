@@ -12,8 +12,8 @@ function mountMonitor() {
   const setting = useSettingStore();
   setting.$persist = () => {};
   monitor.watchGroup = [
-    { id: 0, id_str: '0', name: '自选', editable: false, symbols: [{ symbol: '600519' }] },
-    { id: 1, id_str: '1', name: '行业', editable: true, symbols: [] },
+    { id: 0, id_str: '0', name: '自选', symbols: [{ symbol: '600519' }] },
+    { id: 1, id_str: '1', name: '行业', symbols: [] },
   ];
   const wrapper = mount(Monitor, {
     global: {
@@ -21,6 +21,7 @@ function mountMonitor() {
       stubs: {
         QuoteTable: { template: '<div class="quote-table-stub" />' },
         ConceptTable: { template: '<div class="concept-table-stub" />' },
+        SectorTable: { template: '<div class="sector-table-stub" />' },
         Iconbar: { template: '<div class="iconbar-stub" />' },
       },
     },
@@ -42,11 +43,12 @@ describe('Monitor 视图 · 顶部 tab', () => {
     expect(wrapper.find('.quote-table-stub').exists()).toBe(false);
   });
 
-  it('其余 tab：行情展示按钮面板，板块与日历仍为占位文案', async () => {
+  it('板块 tab 展示板块表格，行情与日历 tab 分别展示按钮面板与占位文案', async () => {
     const { wrapper } = mountMonitor();
     const tabs = wrapper.findAll('.monitor-tab');
     await tabs[2].trigger('click');
-    expect(wrapper.find('.monitor-placeholder').text()).toContain('板块');
+    expect(wrapper.find('.sector-table-stub').exists()).toBe(true);
+    expect(wrapper.find('.monitor-placeholder').exists()).toBe(false);
     await tabs[3].trigger('click');
     expect(wrapper.find('.monitor-placeholder').exists()).toBe(false);
     expect(wrapper.find('.market-tool').text()).toBe('市场宽度');

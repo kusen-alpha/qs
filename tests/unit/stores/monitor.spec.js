@@ -14,6 +14,12 @@ vi.mock('@/utils/file', () => ({
 
 vi.mock('@/utils/events', () => ({ emit: vi.fn(), on: vi.fn() }));
 
+vi.mock('@/utils/db', () => ({
+  saveWatchGroup: vi.fn(),
+  loadWatchlist: vi.fn(async () => ({ stocks: [], notions: [], members: [] })),
+  buildWatchGroup: vi.fn(() => []),
+}));
+
 describe('monitor store · 自选列表', () => {
   let monitor;
 
@@ -23,18 +29,17 @@ describe('monitor store · 自选列表', () => {
     monitor.$persist = () => {};
   });
 
-  it('默认只有一个「自选」分组且不可编辑', () => {
+  it('默认只有一个「自选」分组（不可重命名/删除）', () => {
     expect(monitor.watchGroup).toHaveLength(1);
     expect(monitor.watchGroup[0]).toMatchObject({
       name: '自选',
       id: 0,
-      editable: false,
     });
     expect(monitor.watchGroup[0].symbols.map((s) => s.symbol)).toEqual(['600519']);
   });
 
   it('addWatchList 把股票加入自选，重复加入会去重', () => {
-    const item = { Code: '000001', Name: '平安银行', QuoteID: '0.000001', SecurityType: 0 };
+    const item = { Code: '000001', Name: '平安银行', QuoteID: '0.000001' };
     monitor.addWatchList(item);
     monitor.addWatchList(item);
     expect(monitor.watchGroup[0].symbols.map((s) => s.symbol)).toEqual(['600519', '000001']);
@@ -55,12 +60,12 @@ describe('monitor store · 自选列表', () => {
     expect(monitor.existSymbolInGroup('1.000001')).toBe(false);
   });
 
-  it('persist 会写入 monitor.dat', async () => {
-    const { writeData } = await import('@/utils/file');
+  it('persist 会把完整快照写入数据库并广播事件', async () => {
+    const { saveWatchGroup } = await import('@/utils/db');
     const { emit } = await import('@/utils/events');
     await monitor.persist('addWatchList');
-    expect(writeData).toHaveBeenCalledTimes(1);
-    expect(writeData.mock.calls[0][1]).toBe('monitor.dat');
+    expect(saveWatchGroup).toHaveBeenCalledTimes(1);
+    expect(saveWatchGroup.mock.calls[0][0][0]).toMatchObject({ name: '自选', id: 0 });
     expect(emit).toHaveBeenCalledWith('stateChange', 'addWatchList');
   });
 });

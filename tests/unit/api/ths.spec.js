@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   parseBoardMap,
   parseFieldBoardCode,
+  parseStockConcepts,
   parseSwIndustry,
 } from '@/api/ths';
 
@@ -41,5 +42,31 @@ describe('ths · 同花顺行业板块', () => {
       881149: '公路铁路运输',
     });
     expect(parseBoardMap('')).toEqual({});
+  });
+});
+
+describe('ths · 官方概念成分', () => {
+  it('提取概念代码与名称，去掉标签与多余空白', () => {
+    const html = [
+      '<table><tr><td class="gnName" clid="885761"> 白酒 </td>',
+      '<td class="gnName" clid="885789"><a>锂电池</a></td></tr></table>',
+    ].join('');
+    expect(parseStockConcepts(html)).toEqual([
+      { code: '885761', name: '白酒' },
+      { code: '885789', name: '锂电池' },
+    ]);
+  });
+
+  it('缺少 clid 时 code 为空串，重名概念只保留一条', () => {
+    const html = [
+      '<td class="gnName">白酒</td>',
+      '<td class="gnName" clid="">白酒</td>',
+      '<td class="other">不是概念</td>',
+    ].join('');
+    expect(parseStockConcepts(html)).toEqual([{ code: '', name: '白酒' }]);
+  });
+
+  it('空页面返回空数组', () => {
+    expect(parseStockConcepts('')).toEqual([]);
   });
 });

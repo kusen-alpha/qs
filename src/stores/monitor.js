@@ -1,7 +1,6 @@
 import { defineStore } from 'pinia';
 import { emit } from '../utils/events';
-import { writeData, Files } from '../utils/file';
-import { Exchange } from '../constants';
+import { loadWatchlist, saveWatchGroup, buildWatchGroup } from '../utils/db';
 
 /** 自选列表：只保留一个固定分组「自选」 */
 export const useMonitorStore = defineStore('monitor', {
@@ -10,9 +9,8 @@ export const useMonitorStore = defineStore('monitor', {
       {
         name: '自选',
         id: 0,
-        editable: false,
         symbols: [
-          { symbol: '600519', name: '贵州茅台', exchange: Exchange.STOCK_CN, secid: '1.600519', source: '1' },
+          { symbol: '600519', name: '贵州茅台', secid: '1.600519', source: '1' },
         ],
       },
     ],
@@ -24,7 +22,6 @@ export const useMonitorStore = defineStore('monitor', {
         name: item.Name,
         secid: item.QuoteID,
         source: '1',
-        exchange: item.SecurityType,
       };
       if (!this.watchGroup[0].symbols.find((s) => s.secid == symbol.secid)) {
         this.watchGroup[0].symbols.push(symbol);
@@ -36,10 +33,19 @@ export const useMonitorStore = defineStore('monitor', {
     existSymbolInGroup(secid) {
       return !!this.watchGroup[0].symbols.find((s) => s.secid == secid);
     },
-    persist(event) {
-      emit('stateChange', event);
+    /** 从数据库回填（数据库为空时保留现有数据），供主窗口启动时调用 */
+    async loadFromDb() {
+      const groups = buildWatchGroup(await loadWatchlist());
+      if (!groups.length) return false;
+      this.watchGroup = groups;
       this.$persist();
-      writeData(Files.MONITOR.folder, Files.MONITOR.file, JSON.parse(JSON.stringify(this.$state)), true);
+      return true;
+    },
+    /** 写 localStorage 快照（供子窗口同步）并落库 */
+    persist(event) {
+      this.$persist();
+      emit('stateChange', event);
+      return saveWatchGroup(JSON.parse(JSON.stringify(this.watchGroup)));
     },
   },
   persist: {

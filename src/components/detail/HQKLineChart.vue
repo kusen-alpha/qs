@@ -2,7 +2,7 @@
   <div class="box detail-box">
     <div class="right detail-right">
       <div class="chart-toolbar" data-tauri-drag-region>
-        <span class="chart-title">日K · MACD(12,26,9)</span>
+        <span class="chart-title">{{ chartTitle }}</span>
         <span v-if="isFallback" class="chart-hint">示例数据（行情接口不可用）</span>
       </div>
       <div class="rightContent">
@@ -15,19 +15,33 @@
 </template>
 
 <script setup>
-import { nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import HQChart from 'hqchart';
 import { fetchKline, fallbackKline, secidToSymbol } from '../../utils/kline';
+import { loadBoardK } from '../../utils/db';
 
 const props = defineProps({
   symbol: { type: String, default: '' },
   name: { type: String, default: '' },
   code: { type: String, default: '' },
+  // 板块图表：传入 board_key 时改为读取本地板块指数（无 OHLC，按收盘价扁平 K 线绘制）
+  boardKey: { type: String, default: '' },
 });
 
 const klineBox = ref(null);
 const isFallback = ref(false);
 let klineChart = null;
+
+const isBoard = computed(() => Boolean(props.boardKey));
+const chartTitle = computed(() =>
+  isBoard.value
+    ? `${props.name || '板块'} · 收盘指数 · MACD(12,26,9)`
+    : '日K · MACD(12,26,9)',
+);
+/* 板块没有真实代码，用一个固定伪代码满足 HQChart 的 Symbol 字段 */
+const chartSymbol = computed(() =>
+  isBoard.value ? '880001' : secidToSymbol(props.symbol),
+);
 
 function applyTheme() {
   const res = HQChart.Chart.JSChart.GetResource();
@@ -62,6 +76,7 @@ function toRowList(candles) {
 }
 
 async function loadDayRows() {
+  if (isBoard.value) return loadBoardRows();
   const res = await fetchKline(props.symbol);
   const hasReal = Boolean(res && res.candles && res.candles.length);
   isFallback.value = !hasReal;
@@ -69,6 +84,24 @@ async function loadDayRows() {
   return {
     stockName: (res && res.name) || props.name || '',
     rows: toRowList(candles),
+  };
+}
+
+/** 板块指数：只有收盘价，按扁平 K 线（开高低收相同）绘制出收盘线 */
+async function loadBoardRows() {
+  const data = await loadBoardK(props.boardKey, 400);
+  const dates = (data && data.dates) || [];
+  const close = (data && data.close) || [];
+  const amount = (data && data.amount) || [];
+  isFallback.value = !dates.length;
+  const rows = dates.map((date, i) => {
+    const value = close[i] || 0;
+    const yclose = i === 0 ? value : close[i - 1] || value;
+    return [dateNumber(date), yclose, value, value, value, value, 0, amount[i] || 0];
+  });
+  return {
+    stockName: (data && data.board && data.board.name) || props.name || '',
+    rows,
   };
 }
 
@@ -81,7 +114,7 @@ function networkFilter(obj, callback) {
   }
   if (requestName === 'KLineChartContainer::RequestHistoryData') {
     loadDayRows().then((result) => {
-      callback({ symbol: secidToSymbol(props.symbol), name: result.stockName, data: result.rows });
+      callback({ symbol: chartSymbol.value, name: result.stockName, data: result.rows });
     });
     return;
   }
@@ -91,7 +124,7 @@ function networkFilter(obj, callback) {
 function klineOption() {
   return {
     Type: '历史K线图',
-    Symbol: secidToSymbol(props.symbol),
+    Symbol: chartSymbol.value,
     NetworkFilter: networkFilter,
     IsAutoUpdate: false,
     IsShowRightMenu: false,
@@ -144,7 +177,7 @@ function onResize() {
 }
 
 watch(
-  () => props.symbol,
+  () => [props.symbol, props.boardKey],
   () => rebuild(),
 );
 

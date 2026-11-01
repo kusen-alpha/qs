@@ -17,6 +17,12 @@
         @click="switchTab(tab.key)"
         >{{ tab.label }}</span
       >
+      <WindowMaxButton
+        class="monitor-max"
+        :size="20"
+        position="static"
+        background="transparent"
+      />
       <el-button class="monitor-close" type="info" text title="关闭" @click="closeApp">
         <el-icon>
           <svg viewBox="0 0 24 24" width="1em" height="1em" fill="currentColor">
@@ -27,6 +33,7 @@
     </div>
     <QuoteTable v-if="activeTab === 'watch'" />
     <ConceptTable v-else-if="activeTab === 'concept'" />
+    <SectorTable v-else-if="activeTab === 'sector'" />
     <MarketPanel v-else-if="activeTab === 'market'" />
     <div v-else class="monitor-placeholder">{{ activeTabLabel }} · 内容开发中</div>
     <Iconbar :tab="activeTab" />
@@ -43,8 +50,10 @@ import {
 } from '@tauri-apps/api/window';
 import QuoteTable from '../components/monitor/Table.vue';
 import ConceptTable from '../components/monitor/ConceptTable.vue';
+import SectorTable from '../components/monitor/SectorTable.vue';
 import MarketPanel from '../components/market/MarketPanel.vue';
 import Iconbar from '../components/monitor/Iconbar.vue';
+import WindowMaxButton from '../components/WindowMaxButton.vue';
 import { useSettingStore } from '../stores/setting';
 import { isTauri } from '../utils/env';
 import { applyDragRegion, calcTableWidth } from '../utils/layout';
@@ -111,14 +120,17 @@ function cardEl() {
   return document.getElementById('monitorCard');
 }
 
-function resizeWindow() {
+async function resizeWindow() {
   if (!isTauri()) return;
   const el = cardEl();
   if (!el) return;
+  const win = getCurrentWindow();
+  // 最大化时保持全屏，避免自动调整尺寸把窗口还原
+  if (await win.isMaximized().catch(() => false)) return;
   const width = setting.isFixWidth
     ? setting.fixedWidth
     : calcTableWidth(el.offsetWidth, el.offsetHeight, setting.watchFields, setting.tableSize);
-  getCurrentWindow().setSize(new LogicalSize(width, el.offsetHeight)).catch(() => {});
+  win.setSize(new LogicalSize(width, el.offsetHeight)).catch(() => {});
 }
 
 function scheduleResize() {
@@ -127,7 +139,10 @@ function scheduleResize() {
 }
 
 async function onLeave(event) {
-  if (!setting.isEdgeFold) return;
+  if (!setting.isEdgeFold || !isTauri()) return;
+  const win = getCurrentWindow();
+  // 最大化时窗口已铺满屏幕，若仍按边缘折叠会把窗口移到屏幕外
+  if (await win.isMaximized().catch(() => false)) return;
   const el = cardEl();
   if (!el) return;
   const nearEdge =
@@ -137,7 +152,6 @@ async function onLeave(event) {
       event.offsetX >= el.offsetWidth - 2 ||
       event.offsetY >= el.offsetHeight - 2);
   if (!nearEdge) return;
-  const win = getCurrentWindow();
   const [pos, size, monitors] = await Promise.all([
     win.outerPosition(),
     win.outerSize(),
@@ -158,6 +172,7 @@ async function onLeave(event) {
 async function onEnter() {
   if (!setting.isEdgeFold || !isTauri()) return;
   const win = getCurrentWindow();
+  if (await win.isMaximized().catch(() => false)) return;
   const [pos, size, monitors] = await Promise.all([
     win.outerPosition(),
     win.outerSize(),
@@ -262,8 +277,21 @@ onBeforeUnmount(() => {
   gap: 10px;
   padding: 0 4px;
 }
-.monitor-close {
+.monitor-header :deep(.monitor-max) {
   margin-left: auto;
+}
+.monitor-header :deep(.monitor-max .el-icon) {
+  font-size: 18px;
+  color: #909399;
+}
+.monitor-header :deep(.monitor-max:hover) {
+  background-color: transparent;
+}
+.monitor-header :deep(.monitor-max:hover .el-icon) {
+  color: #409eff;
+}
+.monitor-header .monitor-close {
+  margin-left: 0;
   width: 20px;
   height: 20px;
   min-height: 20px;

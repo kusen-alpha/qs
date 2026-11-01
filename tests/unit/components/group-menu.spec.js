@@ -90,7 +90,7 @@ describe('GroupMenu · 两级概念菜单', () => {
     await wrapper.find('.button-new-tag').trigger('click');
     await typeAndEnter(wrapper, '.input-new-tag', '板块');
     expect(cache.group).toHaveLength(3);
-    expect(cache.group[2]).toMatchObject({ name: '板块', editable: true, children: [] });
+    expect(cache.group[2]).toMatchObject({ name: '板块', children: [] });
   });
 
   it('重名创建一级概念会被拒绝', async () => {
@@ -106,11 +106,34 @@ describe('GroupMenu · 两级概念菜单', () => {
     expect(cache.group[1].children.map((c) => c.name)).toEqual(['白酒', '啤酒']);
   });
 
-  it('二级概念不能重名，也不能再挂三级', async () => {
+  it('二级概念同一一级概念下不能重名，不同一级概念之间可以重名', async () => {
     await wrapper.find('.add-sub-button').trigger('click');
     await typeAndEnter(wrapper, '.sub-input-new-tag', '白酒');
     expect(cache.group[1].children).toHaveLength(1);
 
+    cache.group.push(concept(3, '板块'));
+    await nextTick();
+    expect(cache.addSubConcept(3, '白酒')).toBe(true);
+    expect(cache.group[2].children.map((c) => c.name)).toEqual(['白酒']);
+
     cache.group[1].children.forEach((c) => expect(c.children || []).toHaveLength(0));
+  });
+
+  it('↑↓ 按钮可调整一级概念与二级概念顺序', async () => {
+    cache.group[1].children.push(concept(3, '啤酒'));
+    cache.group.push(concept(4, '板块'));
+    await nextTick();
+
+    const board = wrapper.findAll('.concept-item').find((w) => w.text().includes('板块'));
+    await board.findAll('.move-btn')[0].trigger('click');
+    expect(cache.group.map((g) => g.name)).toEqual(['自选', '板块', '行业']);
+
+    await clickItem(wrapper, '行业');
+    const beer = wrapper.findAll('.sub-item').find((w) => w.text().includes('啤酒'));
+    await beer.findAll('.move-btn')[0].trigger('click');
+    expect(cache.group.find((g) => g.id === 1).children.map((c) => c.name)).toEqual([
+      '啤酒',
+      '白酒',
+    ]);
   });
 });

@@ -20,15 +20,15 @@ vi.mock('../../mocks/tauri-api.js', () => ({
 }));
 
 describe('windows · 子窗口配置', () => {
-  it('包含五个子窗口，label 唯一', () => {
+  it('包含六个子窗口，label 唯一', () => {
     const labels = Object.values(WindowConfigs).map((c) => c.label);
-    expect(labels).toEqual(['search', 'detail', 'group', 'setting', 'marketWidth']);
+    expect(labels).toEqual(['search', 'detail', 'group', 'setting', 'boardChart', 'marketWidth']);
     expect(new Set(labels).size).toBe(labels.length);
   });
 
   it('常规子窗口都是 750×450、无边框、透明、不可缩放', () => {
     for (const config of Object.values(WindowConfigs)) {
-      if (config.label === 'marketWidth') continue;
+      if (['marketWidth', 'boardChart'].includes(config.label)) continue;
       expect(config.window).toMatchObject({
         width: 750,
         height: 450,
@@ -37,6 +37,16 @@ describe('windows · 子窗口配置', () => {
         transparent: true,
       });
     }
+  });
+
+  it('板块图表窗口更大且可缩放，指向 /#/boardchart', () => {
+    expect(WindowConfigs.boardChart.window).toMatchObject({
+      title: '板块图表',
+      url: '/#/boardchart',
+      width: 900,
+      height: 560,
+      resizable: true,
+    });
   });
 
   it('市场宽度窗口更大且可缩放，指向 /#/market', () => {

@@ -22,6 +22,7 @@ function mountMonitor() {
         QuoteTable: { template: '<div class="quote-table-stub" />' },
         ConceptTable: { template: '<div class="concept-table-stub" />' },
         SectorTable: { template: '<div class="sector-table-stub" />' },
+        CalendarTable: { template: '<div class="calendar-table-stub" />' },
         Iconbar: { template: '<div class="iconbar-stub" />' },
       },
     },
@@ -43,7 +44,7 @@ describe('Monitor 视图 · 顶部 tab', () => {
     expect(wrapper.find('.quote-table-stub').exists()).toBe(false);
   });
 
-  it('板块 tab 展示板块表格，行情与日历 tab 分别展示按钮面板与占位文案', async () => {
+  it('板块 tab 展示板块表格，行情与日历 tab 分别展示按钮面板与日历列表', async () => {
     const { wrapper } = mountMonitor();
     const tabs = wrapper.findAll('.monitor-tab');
     await tabs[2].trigger('click');
@@ -53,7 +54,8 @@ describe('Monitor 视图 · 顶部 tab', () => {
     expect(wrapper.find('.monitor-placeholder').exists()).toBe(false);
     expect(wrapper.find('.market-tool').text()).toBe('市场宽度');
     await tabs[4].trigger('click');
-    expect(wrapper.find('.monitor-placeholder').text()).toContain('日历');
+    expect(wrapper.find('.calendar-table-stub').exists()).toBe(true);
+    expect(wrapper.find('.monitor-placeholder').exists()).toBe(false);
   });
 
   it('透明度与灰度写入卡片样式', async () => {

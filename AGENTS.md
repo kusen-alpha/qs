@@ -3,8 +3,8 @@
 ## 项目概览
 
 - 桌面端行情/自选工具：Tauri v2（Windows）+ Vue 3 + Pinia，构建工具 Vite 4。
-- 前端源码在 `src/`，Rust 后端与 SQLite 数据层在 `src-tauri/src/main.rs`，单元测试在 `tests/`（vitest + jsdom）。
-- 数据库文件：`%APPDATA%/com.daic.qushi/stocks.db`，表结构版本记录在 `meta.schema_version`；表结构变更必须走 `open_db` 中的幂等迁移。
+- 前端源码在 `src/`，单元测试在 `tests/`（vitest + jsdom）。
+- 数据层：Rust 单文件 `src-tauri/src/main.rs`，同时支持 SQLite（默认 `%APPDATA%/com.daic.qushi/data/stocks.db`）与 MySQL；连接配置存于 `%APPDATA%/com.daic.qushi/db_config.json`（MySQL 密码加密），首次启动由 `src/views/Setup.vue` 向导写入。表结构版本记录在 `meta.schema_version`；表结构变更必须走 `init_sqlite` / `MYSQL_SCHEMA_SQL` 中的幂等迁移。
 
 ## 开发调试规范
 

@@ -35,6 +35,7 @@
     <ConceptTable v-else-if="activeTab === 'concept'" />
     <SectorTable v-else-if="activeTab === 'sector'" />
     <MarketPanel v-else-if="activeTab === 'market'" />
+    <CalendarTable v-else-if="activeTab === 'calendar'" />
     <div v-else class="monitor-placeholder">{{ activeTabLabel }} · 内容开发中</div>
     <Iconbar :tab="activeTab" />
   </el-card>
@@ -52,6 +53,7 @@ import QuoteTable from '../components/monitor/Table.vue';
 import ConceptTable from '../components/monitor/ConceptTable.vue';
 import SectorTable from '../components/monitor/SectorTable.vue';
 import MarketPanel from '../components/market/MarketPanel.vue';
+import CalendarTable from '../components/monitor/CalendarTable.vue';
 import Iconbar from '../components/monitor/Iconbar.vue';
 import WindowMaxButton from '../components/WindowMaxButton.vue';
 import { useSettingStore } from '../stores/setting';

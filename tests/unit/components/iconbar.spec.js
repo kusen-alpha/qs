@@ -53,6 +53,15 @@ describe('Iconbar · 底部图标栏', () => {
     expect(wrapper.find('.profit').exists()).toBe(false);
   });
 
+  it('日历 tab：设置 / 添加 两个按钮，添加按钮打开独立事件窗口', async () => {
+    const { wrapper } = mountBar('calendar');
+    expect(wrapper.findAll('.buttons')).toHaveLength(2);
+    expect(wrapper.find('.profit').exists()).toBe(false);
+
+    await wrapper.findAll('.buttons')[1].trigger('click');
+    expect(openWindow).toHaveBeenLastCalledWith(WindowConfigs.calendar);
+  });
+
   it('点击盈亏在总盈亏与今盈亏之间切换', async () => {
     const { wrapper } = mountBar('watch');
     expect(wrapper.find('.profit-text').text()).toBe('总盈亏');

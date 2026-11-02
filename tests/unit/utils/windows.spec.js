@@ -20,15 +20,23 @@ vi.mock('../../mocks/tauri-api.js', () => ({
 }));
 
 describe('windows · 子窗口配置', () => {
-  it('包含六个子窗口，label 唯一', () => {
+  it('包含七个子窗口，label 唯一', () => {
     const labels = Object.values(WindowConfigs).map((c) => c.label);
-    expect(labels).toEqual(['search', 'detail', 'group', 'setting', 'boardChart', 'marketWidth']);
+    expect(labels).toEqual([
+      'search',
+      'detail',
+      'group',
+      'setting',
+      'boardChart',
+      'marketWidth',
+      'calendar',
+    ]);
     expect(new Set(labels).size).toBe(labels.length);
   });
 
   it('常规子窗口都是 750×450、无边框、透明、不可缩放', () => {
     for (const config of Object.values(WindowConfigs)) {
-      if (['marketWidth', 'boardChart'].includes(config.label)) continue;
+      if (['marketWidth', 'boardChart', 'calendar'].includes(config.label)) continue;
       expect(config.window).toMatchObject({
         width: 750,
         height: 450,
@@ -67,10 +75,23 @@ describe('windows · 子窗口配置', () => {
     });
   });
 
+  it('日历事件窗口独立且可缩放，指向 /#/calendar', () => {
+    expect(WindowConfigs.calendar.window).toMatchObject({
+      title: '日历事件',
+      url: '/#/calendar',
+      width: 540,
+      height: 560,
+      resizable: true,
+      decorations: false,
+      transparent: true,
+    });
+  });
+
   it('窗口 url 与路由一一对应', () => {
     expect(WindowConfigs.search.window.url).toBe('/#/edit');
     expect(WindowConfigs.detail.window.url).toBe('/#/detail');
     expect(WindowConfigs.setting.window.url).toBe('/#/setting');
+    expect(WindowConfigs.calendar.window.url).toBe('/#/calendar');
   });
 });
 

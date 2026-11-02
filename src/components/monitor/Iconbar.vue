@@ -101,7 +101,7 @@ const props = defineProps({
 });
 
 const isWatch = computed(() => props.tab === 'watch');
-const showAdd = computed(() => props.tab === 'watch' || props.tab === 'concept');
+const showAdd = computed(() => ['watch', 'concept', 'calendar'].includes(props.tab));
 const showChart = computed(() => ['watch', 'concept', 'sector'].includes(props.tab));
 
 const cache = useCacheStore();
@@ -126,6 +126,7 @@ function toggle() {
 
 function onAdd() {
   if (isWatch.value) openSearch();
+  else if (props.tab === 'calendar') openWindow(WindowConfigs.calendar);
   else openWindow(WindowConfigs.group);
 }
 

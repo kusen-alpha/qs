@@ -9,6 +9,8 @@ vi.mock('@/views/Group.vue', () => stub('GroupStub'));
 vi.mock('@/views/Setting.vue', () => stub('SettingStub'));
 vi.mock('@/views/Monitor.vue', () => stub('MonitorStub'));
 vi.mock('@/views/BoardChart.vue', () => stub('BoardChartStub'));
+vi.mock('@/views/Setup.vue', () => stub('SetupStub'));
+vi.mock('@/views/Calendar.vue', () => stub('CalendarStub'));
 
 async function goto(path) {
   const app = document.createElement('div');
@@ -28,20 +30,24 @@ describe('router · 路由表', () => {
   it('页面路由齐全', () => {
     const routes = router.options.routes.map((r) => [r.path, r.name]);
     expect(routes).toEqual([
+      ['/setup', 'setup'],
       ['/', 'monitor'],
       ['/edit', 'editor'],
       ['/detail', 'detail'],
       ['/setting', 'setting'],
       ['/group', 'group'],
       ['/market', 'market'],
+      ['/calendar', 'calendar'],
       ['/boardchart', 'boardChart'],
     ]);
   });
 
   it('导航后按页面给 #app 打上样式前缀 class', async () => {
+    expect((await goto('/setup')).className).toBe('page-setup');
     expect((await goto('/group')).className).toBe('page-group');
     expect((await goto('/setting')).className).toBe('page-setting');
     expect((await goto('/boardchart')).className).toBe('page-detail');
+    expect((await goto('/calendar')).className).toBe('page-calendar');
     expect((await goto('/')).className).toBe('page-main');
   });
 });

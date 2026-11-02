@@ -119,6 +119,26 @@ export const WindowConfigs = {
       dragDropEnabled: false,
     },
   },
+  calendar: {
+    label: 'calendar',
+    window: {
+      title: '日历事件',
+      url: '/#/calendar',
+      width: 540,
+      height: 560,
+      minWidth: 420,
+      minHeight: 380,
+      x: null,
+      y: null,
+      center: true,
+      resizable: true,
+      maximized: false,
+      decorations: false,
+      alwaysOnTop: false,
+      transparent: true,
+      dragDropEnabled: false,
+    },
+  },
 };
 
 /**

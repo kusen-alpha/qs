@@ -62,8 +62,11 @@ async function addConcept(wrapper, name) {
   await nextTick();
 }
 
-afterEach(() => {
+afterEach(async () => {
+  // 等表格的防抖布局任务执行完，卸载后再留出时间消化残留的 requestAnimationFrame
+  await new Promise((resolve) => setTimeout(resolve, 80));
   wrappers.splice(0).forEach((wrapper) => wrapper.unmount());
+  await new Promise((resolve) => setTimeout(resolve, 120));
 });
 
 describe('ConceptManager · 概念管理', () => {

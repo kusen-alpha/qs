@@ -1,10 +1,12 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import { nextTick } from 'vue';
 import { mount } from '@vue/test-utils';
 import ElementPlus from 'element-plus';
 import GroupItems from '@/components/group/GroupItems.vue';
 import { useCacheStore } from '@/stores/cache';
 import { concept, freshPinia, stock } from '../../helpers';
+
+const wrappers = [];
 
 function mountItems(selectGroup = 2) {
   freshPinia();
@@ -17,8 +19,16 @@ function mountItems(selectGroup = 2) {
   ];
   cache.selectGroup = selectGroup;
   const wrapper = mount(GroupItems, { global: { plugins: [ElementPlus] } });
+  wrappers.push(wrapper);
   return { wrapper, cache };
 }
+
+afterEach(async () => {
+  // 等弹窗的锁屏/布局定时器先执行，避免环境销毁后回调再访问 document
+  await new Promise((resolve) => setTimeout(resolve, 80));
+  wrappers.splice(0).forEach((wrapper) => wrapper.unmount());
+  await new Promise((resolve) => setTimeout(resolve, 120));
+});
 
 describe('GroupItems · 股票表格', () => {
   it('自选与二级概念有「添加」「删除」，一级概念没有股票增删按钮', () => {

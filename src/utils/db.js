@@ -168,6 +168,44 @@ export async function saveMarketWidthDb(data) {
   }
 }
 
+/** 读取全部日历事件；浏览器环境返回空数组 */
+export async function loadCalendarEvents() {
+  if (!isTauri()) return [];
+  try {
+    const data = await invoke('db_load_calendar_events');
+    return (data && data.events) || [];
+  } catch (e) {
+    console.error('[db] 读取日历事件失败', e);
+    return [];
+  }
+}
+
+/** 新增/修改日历事件（event.id 存在时为修改），返回事件 id */
+export async function saveCalendarEvent(event) {
+  if (!isTauri()) return null;
+  try {
+    const data = await invoke('db_save_calendar_event', {
+      payload: JSON.stringify(event || {}),
+    });
+    return data ? data.id : null;
+  } catch (e) {
+    console.error('[db] 保存日历事件失败', e);
+    return null;
+  }
+}
+
+/** 删除日历事件，返回删除行数 */
+export async function deleteCalendarEvent(id) {
+  if (!isTauri() || !id) return null;
+  try {
+    const data = await invoke('db_delete_calendar_event', { id });
+    return data ? data.removed : null;
+  } catch (e) {
+    console.error('[db] 删除日历事件失败', e);
+    return null;
+  }
+}
+
 /**
  * 板块列表：scope 为 'sw'（申万一级/二级）或 'ths'（同花顺行业板块）。
  * 返回 [{ board_key, name, level, parent_key, members: [secid], macd }]，
@@ -358,5 +396,57 @@ export async function stats() {
   } catch (e) {
     console.error('[db] 读取数据库统计失败', e);
     return null;
+  }
+}
+
+/** 首次启动向导：读取数据库配置状态（浏览器模式视为已配置） */
+export async function getDbSetupState() {
+  if (!isTauri()) {
+    return {
+      configured: true,
+      saved: true,
+      error: null,
+      default_sqlite_path: '',
+      config: {
+        type: 'sqlite',
+        sqlite: { path: '' },
+        mysql: { host: '127.0.0.1', port: 3306, database: 'qushi', username: 'root' },
+      },
+    };
+  }
+  try {
+    return await invoke('db_setup_state');
+  } catch (e) {
+    return {
+      configured: false,
+      saved: false,
+      error: String(e),
+      default_sqlite_path: '',
+      config: {
+        type: 'sqlite',
+        sqlite: { path: '' },
+        mysql: { host: '127.0.0.1', port: 3306, database: 'qushi', username: 'root' },
+      },
+    };
+  }
+}
+
+/** 测试数据库连接（SQLite 文件或 MySQL 连接信息） */
+export async function testDbConnection(config) {
+  if (!isTauri()) return { ok: true, message: '浏览器模式无需配置数据库' };
+  try {
+    return await invoke('db_test_connection', { payload: JSON.stringify(config || {}) });
+  } catch (e) {
+    return { ok: false, message: String(e) };
+  }
+}
+
+/** 保存配置并初始化数据库，成功后才允许进入主界面 */
+export async function configureDb(config) {
+  if (!isTauri()) return { ok: true, message: '浏览器模式无需配置数据库' };
+  try {
+    return await invoke('db_configure', { payload: JSON.stringify(config || {}) });
+  } catch (e) {
+    return { ok: false, message: String(e) };
   }
 }

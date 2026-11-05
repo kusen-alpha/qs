@@ -245,6 +245,7 @@ describe('cache store · 设置与盈亏', () => {
 
     expect(cache.updateAlertQueue([alert])).toHaveLength(1);
     expect(cache.alertQueue).toHaveLength(1);
+    expect(cache.alertQueue[0]).toEqual({ data: alert });
 
     const repeat = { ...alert, dt: now + 1000 };
     expect(cache.updateAlertQueue([repeat])).toHaveLength(0);
@@ -252,5 +253,14 @@ describe('cache store · 设置与盈亏', () => {
     const later = { ...alert, dt: now + 1200001 };
     expect(cache.updateAlertQueue([later])).toHaveLength(1);
     expect(cache.alertQueue).toHaveLength(1);
+  });
+
+  it('updateAlertQueue：静默窗口外的旧记录会被清理，队列不会无限增长', () => {
+    const now = Date.now();
+    cache.alertQueue = [
+      { data: { secid: '1.600519', trigger: '大于', state: '价格', dt: now - 1300000 } },
+    ];
+    expect(cache.updateAlertQueue([])).toEqual([]);
+    expect(cache.alertQueue).toHaveLength(0);
   });
 });

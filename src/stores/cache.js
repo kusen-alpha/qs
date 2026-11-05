@@ -2,6 +2,9 @@ import { defineStore } from 'pinia';
 import { isEqual } from 'lodash-es';
 import { UpdownColor, defaultWatchFields } from '../constants';
 
+/** 同一提醒的静默窗口：20 分钟内不重复提醒 */
+const ALERT_WINDOW_MS = 1200000;
+
 /** 主窗口运行时状态（设置草稿、提醒去重队列、盈亏汇总） */
 export const useCacheStore = defineStore('cache', {
   state: () => ({
@@ -195,7 +198,7 @@ export const useCacheStore = defineStore('cache', {
       for (let i = this.alertQueue.length - 1; i >= 0; i--) {
         const t = this.alertQueue[i].data;
         if (isEqual(t.secid + t.trigger + t.state, e.secid + e.trigger + e.state)) {
-          return e.dt - t.dt < 1200000 ? 1 : 2;
+          return e.dt - t.dt < ALERT_WINDOW_MS ? 1 : 2;
         }
       }
       return -1;
@@ -203,10 +206,14 @@ export const useCacheStore = defineStore('cache', {
     /** 返回本次需要弹窗提醒的项（20 分钟内重复触发不再提醒） */
     updateAlertQueue(list) {
       const out = [];
+      // 队列只服务于静默窗口内的去重判断：过期记录及时清理，
+      // 否则长期运行会无限增长并随 store 持久化累积
+      const now = Date.now();
+      this.alertQueue = this.alertQueue.filter((a) => now - a.data.dt < ALERT_WINDOW_MS);
       for (const r of list) {
         const state = this._alertState(r);
         if (state === -1) {
-          this.alertQueue.push({ data: r, show_win: true, show_bar: true });
+          this.alertQueue.push({ data: r });
           out.push(r);
         } else if (state === 2) {
           this.alertQueue = this.alertQueue.filter(
@@ -216,7 +223,7 @@ export const useCacheStore = defineStore('cache', {
                 r.secid + r.trigger + r.state,
               ),
           );
-          this.alertQueue.push({ data: r, show_win: true, show_tab: true });
+          this.alertQueue.push({ data: r });
           out.push(r);
         }
       }

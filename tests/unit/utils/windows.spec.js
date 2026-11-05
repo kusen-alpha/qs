@@ -20,7 +20,7 @@ vi.mock('../../mocks/tauri-api.js', () => ({
 }));
 
 describe('windows · 子窗口配置', () => {
-  it('包含七个子窗口，label 唯一', () => {
+  it('包含八个子窗口，label 唯一', () => {
     const labels = Object.values(WindowConfigs).map((c) => c.label);
     expect(labels).toEqual([
       'search',
@@ -30,13 +30,14 @@ describe('windows · 子窗口配置', () => {
       'boardChart',
       'marketWidth',
       'calendar',
+      'check',
     ]);
     expect(new Set(labels).size).toBe(labels.length);
   });
 
   it('常规子窗口都是 750×450、无边框、透明、不可缩放', () => {
     for (const config of Object.values(WindowConfigs)) {
-      if (['marketWidth', 'boardChart', 'calendar'].includes(config.label)) continue;
+      if (['marketWidth', 'boardChart', 'calendar', 'check'].includes(config.label)) continue;
       expect(config.window).toMatchObject({
         width: 750,
         height: 450,

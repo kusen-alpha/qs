@@ -51,8 +51,10 @@ async function mountTable() {
 }
 
 afterEach(async () => {
-  await new Promise((resolve) => setTimeout(resolve, 80));
+  // 先卸载再等待：ElTable 卸载时会排一个 50ms 的 debounce 布局任务，
+  // 若先等待后卸载，该任务会残留到测试环境销毁之后触发 requestAnimationFrame 报错。
   wrappers.splice(0).forEach((wrapper) => wrapper.unmount());
+  await new Promise((resolve) => setTimeout(resolve, 80));
 });
 
 function tableData(wrapper) {

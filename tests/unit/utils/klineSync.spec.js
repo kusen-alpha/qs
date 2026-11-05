@@ -1,4 +1,15 @@
-import { describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+
+vi.mock('@/utils/db', () => ({
+  loadHistory: vi.fn(),
+  loadHistoryTargets: vi.fn(),
+  replaceHistory: vi.fn(),
+  saveHistory: vi.fn(),
+}));
+vi.mock('@/utils/kline', () => ({ MIN_BEG: 20240101, fetchKlineRange: vi.fn() }));
+
+import * as db from '@/utils/db';
+import * as kline from '@/utils/kline';
 import {
   countTradingDays,
   isOverlapSame,
@@ -8,6 +19,7 @@ import {
   needsFieldBackfill,
   pickLatestTradingDate,
   shiftTradingDays,
+  syncWatchHistory,
 } from '@/utils/klineSync';
 
 /** 2026-11-01 是周日，2026-11-02 是周一，2026-10-30 是周五 */
@@ -127,5 +139,44 @@ describe('klineSync · 字段回填判定', () => {
 
   it('库里没有历史时交给首次入库分支', () => {
     expect(needsFieldBackfill('', null, null)).toBe(false);
+  });
+});
+
+describe('klineSync · 全量重拉', () => {
+  const now = new Date(2026, 10, 3, 16, 0);
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    db.loadHistoryTargets.mockResolvedValue([{ secid: '1.600519', last_date: '' }]);
+  });
+
+  it('行情源截断成近期窗口时合并写入，不删除已有历史', async () => {
+    kline.fetchKlineRange.mockImplementation(async (secid, beg) => {
+      if (beg === 20240101) {
+        return { candles: [{ date: '2025-09-29' }, { date: '2026-11-03' }] };
+      }
+      return { candles: [{ date: '2026-11-03' }] };
+    });
+
+    const summary = await syncWatchHistory({ now, delay: 0 });
+
+    expect(summary.reloaded).toBe(1);
+    expect(db.replaceHistory).not.toHaveBeenCalled();
+    expect(db.saveHistory).toHaveBeenCalledWith('1.600519', [
+      { date: '2025-09-29' },
+      { date: '2026-11-03' },
+    ]);
+  });
+
+  it('覆盖 2024-01-01 起的完整历史时整段覆盖', async () => {
+    const candles = [{ date: '2024-01-02' }, { date: '2025-09-29' }, { date: '2026-11-03' }];
+    kline.fetchKlineRange.mockImplementation(async (secid, beg) =>
+      beg === 20240101 ? { candles } : { candles: [{ date: '2026-11-03' }] },
+    );
+
+    await syncWatchHistory({ now, delay: 0 });
+
+    expect(db.replaceHistory).toHaveBeenCalledWith('1.600519', candles);
+    expect(db.saveHistory).not.toHaveBeenCalled();
   });
 });

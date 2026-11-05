@@ -244,7 +244,7 @@ describe('HQKLineChart · 板块指数模式', () => {
     expect(wrapper.text()).toContain('电子 · 收盘指数 · MACD(12,26,9)');
   });
 
-  it('RequestHistoryData 返回扁平 K 线：开高低收同为收盘价，昨收取前一日收盘，名称取板块名', async () => {
+  it('RequestHistoryData 返回扁平 K 线：开高低收同为收盘价，昨收取前一日收盘，成交额由亿换算为元', async () => {
     loadBoardKMock.mockResolvedValue({
       board: { name: '电子' },
       dates: ['2024-01-02', '2024-01-03'],
@@ -257,8 +257,8 @@ describe('HQKLineChart · 板块指数模式', () => {
     expect(result.symbol).toBe('880001');
     expect(result.name).toBe('电子');
     expect(result.data).toEqual([
-      [20240102, 101, 101, 101, 101, 101, 0, 5000],
-      [20240103, 101, 102.5, 102.5, 102.5, 102.5, 0, 6000],
+      [20240102, 101, 101, 101, 101, 101, 0, 5000 * 1e8],
+      [20240103, 101, 102.5, 102.5, 102.5, 102.5, 0, 6000 * 1e8],
     ]);
   });
 

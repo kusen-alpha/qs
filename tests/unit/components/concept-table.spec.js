@@ -20,9 +20,10 @@ vi.mock('@/api/eastmoney', async (importOriginal) => {
   };
 });
 
-vi.mock('@/utils/kline', () => ({
-  fetchKline: async () => null,
-}));
+vi.mock('@/utils/kline', async (importOriginal) => {
+  const actual = await importOriginal();
+  return { ...actual, fetchKline: async () => null };
+});
 
 function mountTable() {
   freshPinia();

@@ -97,7 +97,9 @@ async function loadBoardRows() {
   const rows = dates.map((date, i) => {
     const value = close[i] || 0;
     const yclose = i === 0 ? value : close[i - 1] || value;
-    return [dateNumber(date), yclose, value, value, value, value, 0, amount[i] || 0];
+    // 板块成交额在库内是「亿」，与股票 K 的一致口径是「元」，这里换算后再交给 HQChart
+    const amountYuan = (amount[i] || 0) * 1e8;
+    return [dateNumber(date), yclose, value, value, value, value, 0, amountYuan];
   });
   return {
     stockName: (data && data.board && data.board.name) || props.name || '',

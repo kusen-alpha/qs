@@ -11,6 +11,7 @@ vi.mock('@/views/Monitor.vue', () => stub('MonitorStub'));
 vi.mock('@/views/BoardChart.vue', () => stub('BoardChartStub'));
 vi.mock('@/views/Setup.vue', () => stub('SetupStub'));
 vi.mock('@/views/Calendar.vue', () => stub('CalendarStub'));
+vi.mock('@/views/Check.vue', () => stub('CheckStub'));
 
 async function goto(path) {
   const app = document.createElement('div');
@@ -38,6 +39,7 @@ describe('router · 路由表', () => {
       ['/group', 'group'],
       ['/market', 'market'],
       ['/calendar', 'calendar'],
+      ['/check', 'check'],
       ['/boardchart', 'boardChart'],
     ]);
   });
@@ -48,6 +50,7 @@ describe('router · 路由表', () => {
     expect((await goto('/setting')).className).toBe('page-setting');
     expect((await goto('/boardchart')).className).toBe('page-detail');
     expect((await goto('/calendar')).className).toBe('page-calendar');
+    expect((await goto('/check')).className).toBe('page-check');
     expect((await goto('/')).className).toBe('page-main');
   });
 });

@@ -7,7 +7,7 @@ const mocks = vi.hoisted(() => ({
   fetchKline: vi.fn(),
 }));
 
-vi.mock('@/utils/kline', () => ({ fetchKline: mocks.fetchKline }));
+vi.mock('@/utils/kline', () => ({ fetchKline: mocks.fetchKline, MIN_BEG: 20240101 }));
 
 function today() {
   const d = new Date();
@@ -125,21 +125,11 @@ describe('macd store · 按日缓存 MACD 柱序列', () => {
     expect(started).toEqual(['a', 'b', 'c', 'd', 'e']);
   });
 
-  it('请求 beg 参数为 8 位数字的近似 400 天前日期', async () => {
+  it('请求 beg 参数与历史数据口径一致，固定从 2024-01-01 起', async () => {
     mocks.fetchKline.mockResolvedValue({ candles: candles([1, 2, 3]) });
     await store.ensure(['1.600519']);
 
-    const beg = mocks.fetchKline.mock.calls[0][1];
-    expect(Number.isInteger(beg)).toBe(true);
-    expect(String(beg)).toHaveLength(8);
-    const expected = new Date();
-    expected.setDate(expected.getDate() - 400);
-    const expectedBeg = Number(
-      `${expected.getFullYear()}${String(expected.getMonth() + 1).padStart(2, '0')}${String(
-        expected.getDate(),
-      ).padStart(2, '0')}`,
-    );
-    expect(Math.abs(beg - expectedBeg)).toBeLessThanOrEqual(1);
+    expect(mocks.fetchKline.mock.calls[0][1]).toBe(20240101);
   });
 
   it('全部失败时 60 秒后的重试会对同一批股票再次请求', async () => {

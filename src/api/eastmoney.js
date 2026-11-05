@@ -53,6 +53,9 @@ export class EastmoneyApi {
       amount: a.f6,
       open: a.f17,
       pre_close: a.f18,
+      // 交易所最后成交时间（秒）：非交易日/停牌时仍停留在上一个交易日，
+      // 用于区分「今天真的刷新过行情」与「只是本地又请求了一次」
+      time: a.f86,
     }));
   }
 
@@ -69,7 +72,7 @@ export class EastmoneyApi {
       fid: 'f3',
       fs: 'm:0 t:6,m:0 t:80,m:1 t:2,m:1 t:23,m:0 t:81 s:2048',
       fields:
-        'f1,f2,f3,f4,f5,f6,f7,f8,f9,f10,f12,f13,f14,f15,f16,f17,f18,f20,f21,f23,f24,f25,f22,f11,f62,f115,f152',
+        'f1,f2,f3,f4,f5,f6,f7,f8,f9,f10,f12,f13,f14,f15,f16,f17,f18,f20,f21,f23,f24,f25,f22,f11,f62,f115,f152,f86',
       secids: list.map((s) => s.secid).join(','),
       _: '1623833739532',
     };
@@ -156,7 +159,8 @@ export function summarizeProfit(quotes, configs) {
     const diff = toNumber(quote.price_diff);
     const buyPrice = toNumber(cfg.position.buyPrice);
     const amount = toNumber(cfg.position.buyAmount);
-    if (price && diff && buyPrice && amount) {
+    // 用有限数值判断而不是真值判断：当天涨跌额为 0（平盘）或昨收为空时也要计入总盈亏
+    if (Number.isFinite(price) && Number.isFinite(diff) && Number.isFinite(buyPrice) && Number.isFinite(amount) && amount > 0) {
       sum.total_profit += (price - buyPrice) * amount;
       sum.total_cost += buyPrice * amount;
       sum.today_profit += diff * amount;
@@ -171,6 +175,7 @@ export function summarizeProfit(quotes, configs) {
 /** 金额缩写（原产物 J） */
 export function formatAmount(value) {
   const abs = Math.abs(value);
+  if (!Number.isFinite(abs)) return '-';
   if (abs < 10000) return value.toFixed(0).toString();
   if (abs < 100000) return (value / 10000).toFixed(1) + '万';
   if (abs < 100000000) return (value / 10000).toFixed(0) + '万';
@@ -179,6 +184,7 @@ export function formatAmount(value) {
 
 /** 收益率格式（原产物 _e） */
 export function formatRate(value) {
+  if (!Number.isFinite(value)) return '-';
   if (value < 10) return (value * 100).toFixed(2) + '%';
   if (value < 1000) return value.toFixed(2) + '倍';
   if (value < 100000) return value.toFixed(0) + '倍';

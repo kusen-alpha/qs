@@ -81,6 +81,8 @@ const sortKey = ref(null);
 const sortOrder = ref(null);
 
 let timer = null;
+/* 组件卸载标记：请求返回后不再续排定时器，避免切换标签页后残留轮询 */
+let disposed = false;
 let offs = [];
 
 const upColor = computed(() =>
@@ -220,13 +222,17 @@ function onRowClick(row) {
 }
 
 async function loopRealtime() {
+  if (disposed) return;
   let delay = 4000;
   try {
-    quotes.value = await api.realtime(realtimeSymbols.value);
+    const data = await api.realtime(realtimeSymbols.value);
+    if (disposed) return;
+    quotes.value = data;
   } catch (e) {
     console.error(e);
     delay = 20000;
   }
+  if (disposed) return;
   timer = setTimeout(loopRealtime, delay);
 }
 
@@ -248,6 +254,7 @@ onMounted(async () => {
 });
 
 onBeforeUnmount(() => {
+  disposed = true;
   clearTimeout(timer);
   offs.forEach((off) => off && off());
 });

@@ -288,6 +288,24 @@ describe('QuoteTable · 自选行情表格', () => {
     expect(cellsOfRow(wrapper, 0)[1]).toBe('1510');
   });
 
+  it('请求未返回时卸载组件，返回后不再继续轮询', async () => {
+    vi.useFakeTimers();
+    const symbols = [stock('600519', '贵州茅台', '1.600519')];
+    let release;
+    const pending = new Promise((resolve) => {
+      release = () => resolve([quote('1.600519', '贵州茅台')]);
+    });
+    const { wrapper } = mountTable({ symbols, responses: [pending] });
+    expect(realtimeMock).toHaveBeenCalledTimes(1);
+
+    wrapper.unmount();
+    wrappers.splice(0);
+    release();
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(20000);
+    expect(realtimeMock).toHaveBeenCalledTimes(1);
+  });
+
   it('收到 stateChange 后重新从自选列表刷新表格', async () => {
     const symbols = [stock('600519', '贵州茅台', '1.600519')];
     const quotes = [quote('1.600519', '贵州茅台')];

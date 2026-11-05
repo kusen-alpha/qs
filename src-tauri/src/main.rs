@@ -174,8 +174,9 @@ INSERT INTO histories (secid, date, open, close, high, low, volume, amount)
 DROP TABLE histories_old;
 "#;
 
-/// v8 -> v9：histories 去掉 volume，新增 ratio（涨跌幅，%）与 turnover_ratio（换手率，%），
-/// 成交额不再按两位小数存储（显示精度由前端控制）
+/// v8 -> v9：histories 重建为 ratio（涨跌幅，%）与 turnover_ratio（换手率，%）结构，
+/// 重建语句里暂时去掉旧 volume 列；随后由 init 的兜底 ALTER 重新加回并按需回填
+/// （前端K线仍需要成交量），成交额不再按两位小数存储（显示精度由前端控制）
 const HISTORIES_V9_SQL: &str = r#"
 ALTER TABLE histories RENAME TO histories_old;
 CREATE TABLE histories (
@@ -1020,7 +1021,7 @@ struct MysqlConnSettings {
 }
 
 impl MysqlInput {
-    fn to_conn_settings(&self, require_password: bool) -> Result<MysqlConnSettings, String> {
+    fn to_conn_settings(&self) -> Result<MysqlConnSettings, String> {
         if self.host.trim().is_empty() {
             return Err("MySQL 主机不能为空".into());
         }
@@ -1030,20 +1031,17 @@ impl MysqlInput {
         if self.database.trim().is_empty() {
             return Err("MySQL 数据库名不能为空".into());
         }
-        if self.username.trim().is_empty() {
-            return Err("MySQL 用户名不能为空".into());
-        }
-        let password = match &self.password {
-            Some(password) => password.clone(),
-            None if require_password => return Err("MySQL 密码不能为空".into()),
-            None => String::new(),
+        // 用户名留空默认 root；密码留空即使用空密码（或由调用方复用已保存密码）
+        let username = match self.username.trim() {
+            "" => "root".to_string(),
+            value => value.to_string(),
         };
         Ok(MysqlConnSettings {
             host: self.host.trim().to_string(),
             port: self.port,
             database: self.database.trim().to_string(),
-            username: self.username.trim().to_string(),
-            password,
+            username,
+            password: self.password.clone().unwrap_or_default(),
         })
     }
 }
@@ -1191,12 +1189,35 @@ fn open_mysql_pool(config: &MysqlConnSettings) -> Result<mysql::Pool, String> {
     Ok(pool)
 }
 
+/// 设置 SQLite 运行参数。部分目录（云同步盘、受限文件夹）不支持 WAL，
+/// 此时退回默认回滚日志模式，避免整个配置流程直接失败。
+fn apply_sqlite_pragmas(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch("PRAGMA synchronous = NORMAL; PRAGMA foreign_keys = ON;")
+        .map_err(|e| format!("SQLite 初始化失败: {e}"))?;
+    match conn.query_row("PRAGMA journal_mode = WAL", [], |row| row.get::<_, String>(0)) {
+        Ok(_) => Ok(()),
+        Err(wal_error) => match conn.query_row(
+            "PRAGMA journal_mode = DELETE",
+            [],
+            |row| row.get::<_, String>(0),
+        ) {
+            Ok(_) => Ok(()),
+            Err(fallback_error) => Err(format!(
+                "SQLite 初始化失败: {wal_error}（改用默认日志模式也失败: {fallback_error}）"
+            )),
+        },
+    }
+}
+
 fn test_sqlite_connection(path: &str) -> Result<String, String> {
     let path = path.trim();
     if path.is_empty() {
         return Err("SQLite 文件路径不能为空".into());
     }
     let target = Path::new(path);
+    if target.is_dir() {
+        return Err("该路径是文件夹，请指定数据库文件名（如 stocks.db）".into());
+    }
     if let Some(parent) = target.parent() {
         if !parent.as_os_str().is_empty() {
             std::fs::create_dir_all(parent)
@@ -1204,8 +1225,7 @@ fn test_sqlite_connection(path: &str) -> Result<String, String> {
         }
     }
     let conn = Connection::open(target).map_err(|e| format!("SQLite 打开失败: {e}"))?;
-    conn.execute_batch("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA foreign_keys = ON;")
-        .map_err(|e| format!("SQLite 初始化失败: {e}"))?;
+    apply_sqlite_pragmas(&conn)?;
     conn.execute_batch(
         "CREATE TEMP TABLE IF NOT EXISTS qs_conn_test (id INTEGER PRIMARY KEY, value TEXT);
          INSERT OR REPLACE INTO qs_conn_test (id, value) VALUES (1, 'ok');",
@@ -1251,51 +1271,6 @@ fn init_mysql(config: &MysqlConnSettings) -> Result<mysql::Pool, String> {
     open_mysql_pool(config)
 }
 
-fn backend_from_stored(
-    app: &tauri::AppHandle,
-    config: &StoredDbConfig,
-) -> Result<Backend, String> {
-    if config.kind == "mysql" {
-        let saved = config
-            .mysql
-            .as_ref()
-            .ok_or_else(|| "MySQL 配置缺失".to_string())?;
-        let encoded = saved
-            .password_enc
-            .as_ref()
-            .ok_or_else(|| "MySQL 密码缺失".to_string())?;
-        let password = decrypt_password(app, encoded)?;
-        let settings = MysqlConnSettings {
-            host: saved.host.clone(),
-            port: saved.port,
-            database: saved.database.clone(),
-            username: saved.username.clone(),
-            password,
-        };
-        return Ok(Backend::Mysql(open_mysql_pool(&settings)?));
-    }
-
-    let path = config
-        .sqlite
-        .as_ref()
-        .map(|sqlite| sqlite.path.trim().to_string())
-        .filter(|path| !path.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or(default_sqlite_path(app)?);
-    Ok(Backend::Sqlite(init_sqlite(&path)?))
-}
-
-fn startup_backend(app: &tauri::AppHandle) -> (Option<Backend>, Option<String>) {
-    match load_stored_config(app) {
-        Ok(None) => (None, None),
-        Ok(Some(config)) => match backend_from_stored(app, &config) {
-            Ok(backend) => (Some(backend), None),
-            Err(error) => (None, Some(error)),
-        },
-        Err(error) => (None, Some(error)),
-    }
-}
-
 fn config_view(app: &tauri::AppHandle, saved: Option<&StoredDbConfig>) -> Result<Value, String> {
     let default_path = default_sqlite_path(app)?
         .to_string_lossy()
@@ -1334,7 +1309,39 @@ fn config_view(app: &tauri::AppHandle, saved: Option<&StoredDbConfig>) -> Result
     }))
 }
 
-fn test_connection_value(input: &SetupPayload) -> Value {
+fn mysql_settings_for(
+    app: &tauri::AppHandle,
+    mysql: &MysqlInput,
+) -> Result<MysqlConnSettings, String> {
+    // 用户名留空默认 root；密码留空时优先沿用已保存的同一目标密码
+    let settings = mysql.to_conn_settings()?;
+    if !settings.password.is_empty() {
+        return Ok(settings);
+    }
+    if let Some(saved) = load_stored_config(app)
+        .ok()
+        .flatten()
+        .filter(|config| config.kind == "mysql")
+        .and_then(|config| config.mysql)
+    {
+        if saved.host.trim().eq_ignore_ascii_case(settings.host.trim())
+            && saved.port == settings.port
+            && saved.database.trim() == settings.database.trim()
+            && saved.username.trim() == settings.username.trim()
+        {
+            if let Some(encoded) = saved.password_enc.as_ref() {
+                let password = decrypt_password(app, encoded)?;
+                return Ok(MysqlConnSettings {
+                    password,
+                    ..settings
+                });
+            }
+        }
+    }
+    Ok(settings)
+}
+
+fn test_connection_value(app: &tauri::AppHandle, input: &SetupPayload) -> Value {
     let result = match input.kind.as_str() {
         "sqlite" => input
             .sqlite
@@ -1345,7 +1352,7 @@ fn test_connection_value(input: &SetupPayload) -> Value {
             .mysql
             .as_ref()
             .ok_or_else(|| "缺少 MySQL 配置".to_string())
-            .and_then(|mysql| mysql.to_conn_settings(true))
+            .and_then(|mysql| mysql_settings_for(app, mysql))
             .and_then(|settings| test_mysql_connection(&settings)),
         _ => Err("数据库类型必须是 sqlite 或 mysql".to_string()),
     };
@@ -1363,7 +1370,7 @@ fn configure_database(
     let input: SetupPayload =
         serde_json::from_str(payload).map_err(|e| format!("解析数据库配置失败: {e}"))?;
 
-    let test = test_connection_value(&input);
+    let test = test_connection_value(app, &input);
     if test.get("ok").and_then(|value| value.as_bool()) != Some(true) {
         return Err(test
             .get("message")
@@ -1398,7 +1405,7 @@ fn configure_database(
                 .mysql
                 .as_ref()
                 .ok_or_else(|| "缺少 MySQL 配置".to_string())?;
-            let settings = mysql.to_conn_settings(true)?;
+            let settings = mysql_settings_for(app, mysql)?;
             let pool = init_mysql(&settings)?;
             let password_enc = encrypt_password(app, &settings.password)?;
             let stored = StoredDbConfig {
@@ -1440,9 +1447,9 @@ fn db_setup_state(
 }
 
 #[tauri::command]
-fn db_test_connection(payload: String) -> Result<Value, String> {
+fn db_test_connection(app: tauri::AppHandle, payload: String) -> Result<Value, String> {
     match serde_json::from_str::<SetupPayload>(&payload) {
-        Ok(input) => Ok(test_connection_value(&input)),
+        Ok(input) => Ok(test_connection_value(&app, &input)),
         Err(error) => Ok(json!({
             "ok": false,
             "message": format!("解析数据库配置失败: {error}"),
@@ -1468,6 +1475,49 @@ fn db_configure(
     }
 }
 
+/// 选择目录后立即准备数据库文件：目录不存在则创建，文件不存在则新建（含全部表结构）。
+#[tauri::command]
+fn db_prepare_sqlite(path: String) -> Result<Value, String> {
+    let path = path.trim();
+    if path.is_empty() {
+        return Err("SQLite 文件路径不能为空".into());
+    }
+    let target = Path::new(path);
+    if target.is_dir() {
+        return Err("该路径是文件夹，请指定数据库文件名（如 stocks.db）".into());
+    }
+    init_sqlite(target)?;
+    Ok(json!({ "ok": true, "message": "数据库已就绪" }))
+}
+
+/// 列出目录下的 SQLite 数据库文件名（不含完整路径），供向导选择目录后自动识别。
+#[tauri::command]
+fn db_sqlite_files(dir: String) -> Result<Value, String> {
+    let dir = dir.trim();
+    if dir.is_empty() {
+        return Err("目录不能为空".into());
+    }
+    let target = Path::new(dir);
+    if !target.is_dir() {
+        return Err("该路径不是文件夹".into());
+    }
+    let mut files: Vec<String> = std::fs::read_dir(target)
+        .map_err(|e| format!("读取目录失败: {e}"))?
+        .flatten()
+        .filter(|entry| entry.path().is_file())
+        .filter_map(|entry| {
+            let path = entry.path();
+            let ext = path.extension()?.to_str()?.to_ascii_lowercase();
+            if !matches!(ext.as_str(), "db" | "sqlite" | "sqlite3") {
+                return None;
+            }
+            path.file_name()?.to_str().map(|name| name.to_string())
+        })
+        .collect();
+    files.sort();
+    Ok(json!({ "files": files }))
+}
+
 fn init_sqlite(path: &Path) -> Result<Connection, String> {
     (|| -> Result<Connection, Box<dyn std::error::Error>> {
     if let Some(parent) = path.parent() {
@@ -1476,9 +1526,7 @@ fn init_sqlite(path: &Path) -> Result<Connection, String> {
         }
     }
     let conn = Connection::open(path)?;
-    conn.execute_batch(
-        "PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA foreign_keys = ON;",
-    )?;
+    apply_sqlite_pragmas(&conn).map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
     conn.execute_batch(SCHEMA_SQL)?;
 
     // 旧库（v1/v2）的 stocks 含冗余列，升级到 v3 时重建一次
@@ -2070,6 +2118,15 @@ fn db_load_watchlist(state: State<'_, Db>) -> Result<Value, String> {
     })
 }
 
+/// 行情快照时间（毫秒）。东财 f86 为交易所最后成交时间（秒），缺失时才回退本地当前时间；
+/// 非交易日/停牌时 f86 停留在上一个交易日，db_load_today_candle 才不会误判「今天刷新过行情」。
+fn quote_stamp_ms(quote: &Value, now: i64) -> i64 {
+    num_of(quote.get("time"))
+        .map(|secs| (secs * 1000.0) as i64)
+        .filter(|stamp| *stamp > 0)
+        .unwrap_or(now)
+}
+
 /// 实时行情批量写入 stocks（每轮刷新一个事务）。
 /// 停牌/缺值字段沿用库内旧值，避免用 NULL 覆盖上一次的有效行情。
 #[tauri::command]
@@ -2096,6 +2153,7 @@ fn db_save_quotes(state: State<'_, Db>, quotes: String) -> Result<Value, String>
                 .get("name")
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
+            let stamp = quote_stamp_ms(quote, now);
 
             tx.execute_d(
                 "INSERT INTO stocks (secid, name, open, high, low, price, ratio, amount, turnover_ratio, updated_at)
@@ -2132,7 +2190,7 @@ fn db_save_quotes(state: State<'_, Db>, quotes: String) -> Result<Value, String>
                     num_of(quote.get("range")),
                     round2(num_of(quote.get("amount"))),
                     num_of(quote.get("turn")),
-                    now
+                    stamp
                 ],
             )?;
             updated += 1;
@@ -3698,6 +3756,8 @@ fn main() {
             db_setup_state,
             db_test_connection,
             db_configure,
+            db_sqlite_files,
+            db_prepare_sqlite,
             db_migrate_watchgroup,
             db_save_watchgroup,
             db_load_watchlist,
@@ -3732,8 +3792,8 @@ fn main() {
             }
         })
         .setup(|app| {
-            let (backend, error) = startup_backend(app.handle());
-            app.manage(Db::new(backend, error));
+            // 每次启动都由前端向导重新选择数据库，这里不再自动打开上次配置
+            app.manage(Db::new(None, None));
 
             if let Some(main) = app.get_webview_window("main") {
                 let _ = main.set_always_on_top(true);
@@ -3794,6 +3854,19 @@ mod calendar_tests {
     }
 
     #[test]
+    fn 行情时间戳优先使用交易所时间() {
+        let quote = serde_json::json!({ "time": 1762300200 });
+        assert_eq!(super::quote_stamp_ms(&quote, 999), 1762300200_000);
+    }
+
+    #[test]
+    fn 行情时间戳缺失或非法时回退本地时间() {
+        assert_eq!(super::quote_stamp_ms(&serde_json::json!({}), 123), 123);
+        assert_eq!(super::quote_stamp_ms(&serde_json::json!({ "time": "-" }), 123), 123);
+        assert_eq!(super::quote_stamp_ms(&serde_json::json!({ "time": 0 }), 123), 123);
+    }
+
+    #[test]
     fn 密码加解密往返() {
         let key = [7u8; 32];
         let encoded = super::encrypt_with_key(&key, "secret-password").unwrap();
@@ -3819,6 +3892,70 @@ mod calendar_tests {
         assert_eq!(version, "16");
         drop(conn);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn mysql_用户名与密码可留空() {
+        let input = super::MysqlInput {
+            host: " 127.0.0.1 ".into(),
+            port: 3306,
+            database: " qushi ".into(),
+            username: "   ".into(),
+            password: None,
+        };
+        let settings = input.to_conn_settings().unwrap();
+        assert_eq!(settings.host, "127.0.0.1");
+        assert_eq!(settings.database, "qushi");
+        assert_eq!(settings.username, "root");
+        assert_eq!(settings.password, "");
+    }
+
+    #[test]
+    fn sqlite_路径是文件夹时给出提示() {
+        let dir = std::env::temp_dir().join("qs_sqlite_dir_check");
+        std::fs::create_dir_all(&dir).unwrap();
+        let error = super::test_sqlite_connection(&dir.to_string_lossy()).unwrap_err();
+        assert!(error.contains("该路径是文件夹"), "实际错误: {error}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn 准备数据库会创建文件与表结构() {
+        let dir = std::env::temp_dir().join("qs_prepare_sqlite_check");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("stocks.db");
+        super::db_prepare_sqlite(path.to_string_lossy().into_owned()).unwrap();
+        assert!(path.exists());
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        let version: String = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'schema_version'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, "16");
+        drop(conn);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn 列出目录中的数据库文件() {
+        let dir = std::env::temp_dir().join("qs_sqlite_files_check");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("stocks.db"), b"").unwrap();
+        std::fs::write(dir.join("old.sqlite3"), b"").unwrap();
+        std::fs::write(dir.join("note.txt"), b"").unwrap();
+        let value = super::db_sqlite_files(dir.to_string_lossy().into_owned()).unwrap();
+        let files: Vec<String> = value["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item.as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(files, vec!["old.sqlite3", "stocks.db"]);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

@@ -9,6 +9,8 @@ import { fetchKlineRange, MIN_BEG } from './kline';
  * 4. 不一致判为复权基准变动（除权/分红），删除该股旧数据后全量重拉覆盖。
  */
 const FULL_BEG = MIN_BEG;
+/** 完整历史的判定起点：2024 年首个交易日附近，早于该日即视为覆盖 2024-01-01 起 */
+const FULL_COVER_ISO = '2024-01-10';
 const OVERLAP_TRADING_DAYS = 10;
 const REQUEST_GAP_MS = 300;
 /** 15:15 后当天K线才视为完成 */
@@ -162,7 +164,9 @@ async function reloadAll(secid, baseline, summary) {
     summary.skipped += 1;
     return;
   }
-  await replaceHistory(secid, all);
+  // 数据源可能被截断成只有近期窗口，直接覆盖会丢掉更早历史，此时改为合并写入
+  if (all[0].date <= FULL_COVER_ISO) await replaceHistory(secid, all);
+  else await saveHistory(secid, all);
   summary.reloaded += 1;
 }
 
@@ -209,6 +213,25 @@ async function syncOne(target, baseline, summary) {
 
   // 历史价发生变动：全量重拉并覆盖
   await reloadAll(secid, baseline, summary);
+}
+
+/** 全量重拉指定股票（校验修复用），返回 { reloaded, failed, skipped } */
+export async function reloadHistories(secids = [], { delay = REQUEST_GAP_MS, now = new Date() } = {}) {
+  const list = (secids || []).filter(Boolean);
+  const summary = { reloaded: 0, failed: 0, skipped: 0 };
+  if (!list.length) return summary;
+
+  const baseline = await resolveBaselineTradingDate(now, delay);
+  for (const secid of list) {
+    try {
+      await reloadAll(secid, baseline, summary);
+    } catch (e) {
+      console.error('[kline] 全量重拉失败', secid, e);
+      summary.failed += 1;
+    }
+    if (delay) await sleep(delay);
+  }
+  return summary;
 }
 
 /** 逐只串行补齐，返回统计 */

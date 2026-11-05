@@ -139,6 +139,26 @@ export const WindowConfigs = {
       dragDropEnabled: false,
     },
   },
+  check: {
+    label: 'check',
+    window: {
+      title: '数据校验',
+      url: '/#/check',
+      width: 520,
+      height: 430,
+      minWidth: 420,
+      minHeight: 320,
+      x: null,
+      y: null,
+      center: true,
+      resizable: true,
+      maximized: false,
+      decorations: false,
+      alwaysOnTop: false,
+      transparent: true,
+      dragDropEnabled: false,
+    },
+  },
 };
 
 /**

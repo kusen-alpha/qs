@@ -12,11 +12,13 @@ export async function request(url, options = {}) {
     res = await tauriFetch(url, {
       method: options.method || 'GET',
       headers: options.headers,
+      signal: options.signal,
     });
   } else {
     res = await fetch(url, {
       method: options.method || 'GET',
       headers: options.headers,
+      signal: options.signal,
     });
   }
   const text = await res.text();

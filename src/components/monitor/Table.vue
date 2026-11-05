@@ -243,6 +243,8 @@ const quotes = ref([]);
 const concepts = ref({});
 const api = new EastmoneyApi();
 const timers = { realtime: null, alert: null };
+/* 组件卸载标记：请求返回后不再续排定时器，避免切换标签页后残留轮询 */
+let disposed = false;
 
 const menu = reactive({ visible: false, x: 0, y: 0 });
 const currentRow = ref(null);
@@ -329,9 +331,11 @@ async function ensureConcepts() {
 }
 
 async function loopRealtime() {
+  if (disposed) return;
   let delay = 4000;
   try {
     const data = await api.realtime(pickBySource(monitor.watchGroup, '1'));
+    if (disposed) return;
     quotes.value = data;
     rows.value = mergeRealtime(quotes.value, rows.value, Object.values(symbol.configs));
     try {
@@ -344,10 +348,12 @@ async function loopRealtime() {
     console.error(e);
     delay = 20000;
   }
+  if (disposed) return;
   timers.realtime = setTimeout(loopRealtime, delay);
 }
 
 async function loopAlert() {
+  if (disposed) return;
   let delay = 9000;
   try {
     const list = buildAlerts(quotes.value, symbol.configs);
@@ -361,6 +367,7 @@ async function loopAlert() {
     console.error(e);
     delay = 20000;
   }
+  if (disposed) return;
   timers.alert = setTimeout(loopAlert, delay);
 }
 
@@ -489,6 +496,7 @@ onMounted(async () => {
 });
 
 onBeforeUnmount(() => {
+  disposed = true;
   clearTimeout(timers.realtime);
   clearTimeout(timers.alert);
   offs.forEach((off) => off && off());

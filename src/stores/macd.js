@@ -1,15 +1,9 @@
 import { defineStore } from 'pinia';
-import { fetchKline } from '../utils/kline';
+import { fetchKline, MIN_BEG } from '../utils/kline';
 import { macdHistogram } from '../utils/macd';
 
-/** 取 N 天前的 yyyymmdd，MACD 只需近期日 K（含 EMA 预热） */
-function begDate(days = 400) {
-  const d = new Date();
-  d.setDate(d.getDate() - days);
-  const m = String(d.getMonth() + 1).padStart(2, '0');
-  const day = String(d.getDate()).padStart(2, '0');
-  return Number(`${d.getFullYear()}${m}${day}`);
-}
+/** MACD 取数与历史数据校验同口径：从 2024-01-01 起拉日 K，新自选股也能补全历史 */
+const MACD_BEG = MIN_BEG;
 
 function today() {
   const d = new Date();
@@ -35,7 +29,7 @@ export const useMacdStore = defineStore('macd', {
         (secid) => this.stamps[secid] !== stamp,
       );
       if (!list.length) return;
-      const beg = begDate();
+      const beg = MACD_BEG;
       const failed = [];
       for (let i = 0; i < list.length; i += 4) {
         const chunk = list.slice(i, i + 4);

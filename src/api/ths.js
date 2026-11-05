@@ -152,18 +152,40 @@ const requests = new Map();
 
 function loadCached(code, cache, storageKey, url, parse) {
   const hit = cache[code];
-  if (hit && Date.now() - hit.t < TTL && hit.value) return Promise.resolve(hit);
+  // 命中缓存（含“已抓取但页面确实无该字段”的 null）直接用
+  if (hit && Date.now() - hit.t < TTL) return Promise.resolve({ ...hit, fetched: true });
   if (requests.has(code + storageKey)) return requests.get(code + storageKey);
   const task = enqueue(() => fetchPage(url, 'https://basic.10jqka.com.cn/')).then((html) => {
-    const value = html ? parse(html) : null;
-    if (!value) return hit || null;
-    const item = { value, t: Date.now() };
+    // 抓取失败：有旧缓存就沿用（计时不刷新），没有则标记 fetched=false，调用方不会用空值覆盖库内数据
+    if (!html) return hit ? { ...hit, fetched: false } : { value: null, t: 0, fetched: false };
+    const value = parse(html);
+    const item = { value, t: Date.now(), fetched: true };
     cache[code] = item;
     writeCache(storageKey, cache);
     return item;
   });
   requests.set(code + storageKey, task);
   return task.finally(() => requests.delete(code + storageKey));
+}
+
+/**
+ * 合并「新抓到的行业」与「库内旧值」：
+ * 抓取失败或页面没有对应字段时保留旧值；只有真正解析成功的一组才允许写库，
+ * 避免一次网络失败把已有申万/同花顺行业清空并刷新 7 天缓存计时。
+ */
+function mergeIndustry(old = {}, sw, board, boardMap) {
+  const swValue = sw && sw.value;
+  const swOk = Boolean(sw && sw.fetched && swValue && (swValue.l1 || swValue.l2));
+  const thsValue = board && board.value ? (boardMap && boardMap[board.value]) || '' : '';
+  const boardOk = Boolean(board && board.fetched && thsValue);
+  return {
+    value: {
+      l1: swOk ? swValue.l1 || '' : old.l1 || '',
+      l2: swOk ? swValue.l2 || '' : old.l2 || '',
+      ths: boardOk ? thsValue : old.ths || '',
+    },
+    write: swOk || boardOk,
+  };
 }
 
 /** 读取板块全表缓存：{ value: { 代码: 名称 }, t: 更新时间 } */
@@ -241,9 +263,11 @@ export async function loadStockConcepts(codes) {
   if (list.length === 0) return out;
 
   const cached = {};
+  const existing = {};
   if (isTauri()) {
     const rows = await loadIndustries(list);
     for (const row of rows || []) {
+      existing[row.code] = row;
       if (row.updated_at && Date.now() - row.updated_at < TTL) cached[row.code] = row;
     }
   }
@@ -275,20 +299,53 @@ export async function loadStockConcepts(codes) {
         loadFieldBoardCode(code).catch(() => null),
         loadStockConceptList(code).catch(() => null),
       ]);
-      const value = sw && sw.value;
-      const item = {
-        l1: (value && value.l1) || '',
-        l2: (value && value.l2) || '',
-        ths: (board && board.value && boardMap[board.value]) || '',
-        gns: (gns && gns.value) || [],
-      };
+      const merged = mergeIndustry(existing[code], sw, board, boardMap);
+      const item = { ...merged.value, gns: (gns && gns.value) || [] };
       out[code] = item;
-      fresh[code] = item;
+      // 只有真正抓到至少一组行业才写库，失败时既不覆盖旧值也不刷新 7 天计时
+      if (merged.write) fresh[code] = item;
       if (item.gns.length) conceptRows.push({ code, concepts: item.gns });
     }),
   );
   // 只写本次新抓的，避免刷新库里有效记录的 7 天计时
-  saveIndustries(fresh);
+  if (Object.keys(fresh).length) saveIndustries(fresh);
   saveStockConcepts(conceptRows);
+  return out;
+}
+
+/**
+ * 忽略本地缓存强制重抓申万/同花顺行业（数据校验修复用）。
+ * 返回 代码 -> { l1, l2, ths }，抓到的结果同时写回 stocks。
+ */
+export async function refreshStockIndustries(codes) {
+  const list = [...new Set((codes || []).map((c) => String(c || '')))]
+    .filter((c) => /^\d{6}$/.test(c));
+  const out = {};
+  if (list.length === 0) return out;
+
+  const existing = {};
+  if (isTauri()) {
+    const rows = await loadIndustries(list);
+    for (const row of rows || []) existing[row.code] = row;
+  }
+
+  const boardMap = await loadBoardMap();
+  const fresh = {};
+  await Promise.all(
+    list.map(async (code) => {
+      // 校验失败说明库内字段不可用，清掉单只缓存后强制走接口
+      delete swCache[code];
+      delete fieldCache[code];
+      const [sw, board] = await Promise.all([
+        loadSwIndustry(code).catch(() => null),
+        loadFieldBoardCode(code).catch(() => null),
+      ]);
+      const merged = mergeIndustry(existing[code], sw, board, boardMap);
+      out[code] = merged.value;
+      // 抓取失败时保留旧值且不写库，避免空串覆盖并刷新 7 天计时
+      if (merged.write) fresh[code] = merged.value;
+    }),
+  );
+  if (Object.keys(fresh).length) saveIndustries(fresh);
   return out;
 }

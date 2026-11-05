@@ -10,6 +10,11 @@ import { loadHistory, saveHistory } from './db';
 const UT = '7eea3edcaed734bea9cbfc24409ed989';
 /** 日K最早日期：2024-01-01 */
 export const MIN_BEG = 20240101;
+const MIN_BEG_ISO = '2024-01-01';
+/** 视为「已覆盖 2024-01-01 起」的判定日（2024 年首个交易日 1 月 2 日） */
+const FULL_COVER_ISO = '2024-01-10';
+/** 单次行情请求超时：东财不可达时不能无限等待，超时后立即走腾讯兜底 */
+const REQUEST_TIMEOUT_MS = 8000;
 
 export const EASTMONEY_HEADERS = {
   Referer: 'https://quote.eastmoney.com/',
@@ -31,13 +36,17 @@ export function secidToSymbol(secid) {
   return dot === -1 ? text : text.slice(dot + 1);
 }
 
-/** 东财 secid（1.600519）转腾讯代码（sh600519） */
+/** 东财 secid（1.600519）转腾讯代码（sh600519 / sz000001 / bj920002） */
 export function secidToTencentSymbol(secid) {
   const text = String(secid || '');
   const dot = text.indexOf('.');
   if (dot === -1) return text;
   const market = text.slice(0, dot);
-  return (market === '1' ? 'sh' : 'sz') + text.slice(dot + 1);
+  const code = text.slice(dot + 1);
+  if (market === '1') return `sh${code}`;
+  // 北交所代码以 43/83/87/88/92 开头，腾讯用 bj 前缀（sz 前缀会查不到数据）
+  if (/^[489]/.test(code)) return `bj${code}`;
+  return `sz${code}`;
 }
 
 export function buildKlineUrl(secid, beg = MIN_BEG, end = 20500101) {
@@ -78,14 +87,17 @@ export function parseKlines(klines) {
     const high = Number(arr[3]);
     const low = Number(arr[4]);
     if (![open, close, high, low].every(Number.isFinite)) continue;
+    const volume = numOf(arr[5]);
+    const amount = numOf(arr[6]);
     list.push({
       date: arr[0],
       open,
       close,
       high,
       low,
-      volume: Number(arr[5]) * 100,
-      amount: Number(arr[6]),
+      // 缺失成交量/成交额时显式置 null：NaN 会让K线重叠比对永远不相等，触发反复全量重拉
+      volume: volume == null ? null : volume * 100,
+      amount,
       ratio: arr.length > 8 ? numOf(arr[8]) : null,
       turnover_ratio: arr.length > 10 ? numOf(arr[10]) : null,
     });
@@ -149,11 +161,24 @@ export function parseTencentKlines(lines) {
   return list;
 }
 
+/** 带超时的请求：避免单个接口卡住时整段K线一直等不到结果 */
+async function timedRequest(url, options = {}) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  try {
+    return await request(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /** 东财日K（主数据源） */
 async function fetchEastmoneyRange(secid, beg, end) {
   if (eastmoneyDown) return null;
   try {
-    const res = await request(buildKlineUrl(secid, beg, end), { headers: EASTMONEY_HEADERS });
+    const res = await timedRequest(buildKlineUrl(secid, beg, end), {
+      headers: EASTMONEY_HEADERS,
+    });
     const data = res && res.data && res.data.data;
     if (data && Array.isArray(data.klines) && data.klines.length) {
       const candles = parseKlines(data.klines);
@@ -180,7 +205,7 @@ async function fetchTencentRange(secid, beg, end) {
     const param = `${symbol},day,${chunkBeg},${chunkEnd},${TENCENT_MAX_BARS},qfq`;
     let data = null;
     try {
-      const res = await request(`${TENCENT_URL}?param=${encodeURIComponent(param)}`, {
+      const res = await timedRequest(`${TENCENT_URL}?param=${encodeURIComponent(param)}`, {
         headers: TENCENT_HEADERS,
       });
       data = res && res.data && res.data.data && res.data.data[symbol];
@@ -215,11 +240,36 @@ export async function fetchKlineRange(secid, beg = MIN_BEG, end = 20500101) {
   return fetchTencentRange(secid, beg, end);
 }
 
+/** YYYY-MM-DD 的前一天 */
+function dayBefore(iso) {
+  const [year, month, day] = String(iso).split('-').map(Number);
+  const date = new Date(year, month - 1, day);
+  date.setDate(date.getDate() - 1);
+  return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}`;
+}
+
+/** 数据源只返回近期窗口时（如 MACD 预取 400 天），补拉更早区间直到 MIN_BEG */
+async function fetchOlderRange(secid, firstDate) {
+  if (!firstDate || firstDate <= FULL_COVER_ISO) return [];
+  const endIso = dayBefore(firstDate);
+  if (endIso < MIN_BEG_ISO) return [];
+  const older = await fetchKlineRange(secid, MIN_BEG, Number(endIso.replace(/-/g, '')));
+  if (!older || !older.candles.length) return [];
+  return older.candles.filter((candle) => candle.date >= MIN_BEG_ISO && candle.date < firstDate);
+}
+
 export async function fetchKline(secid, beg = MIN_BEG) {
   const res = await fetchKlineRange(secid, beg);
   if (res) {
-    // 前复权日 K 落库，供接口不可用时兜底
-    saveHistory(secid, res.candles);
+    await saveHistory(secid, res.candles);
+    // 全量请求只拿到近期窗口时（行情源截断），补拉更早历史，保证最早到 2024-01-01
+    if (beg === MIN_BEG && res.candles.length) {
+      const older = await fetchOlderRange(secid, res.candles[0].date);
+      if (older.length) {
+        await saveHistory(secid, older);
+        return { ...res, candles: [...older, ...res.candles] };
+      }
+    }
     return res;
   }
   const cached = await loadHistory(secid, 200);

@@ -1,5 +1,9 @@
-import { describe, expect, it } from 'vitest';
-import { Files, ensureFile, readData, writeData } from '@/utils/file';
+import { afterEach, describe, expect, it } from 'vitest';
+import { Files, ensureFile, readData, setProfileId, writeData } from '@/utils/file';
+
+afterEach(() => {
+  setProfileId('');
+});
 
 describe('file · 数据文件读写（浏览器模式）', () => {
   it('Files 清单与原产物一致', () => {
@@ -25,5 +29,20 @@ describe('file · 数据文件读写（浏览器模式）', () => {
     const raw = JSON.parse(localStorage.getItem('pdd-store:browser://appdata/monitor.dat'));
     expect(typeof raw.data).toBe('string');
     expect(raw.data).not.toContain('自选');
+  });
+
+  it('切换 profileId 后数据写入独立目录，互不串台', async () => {
+    await writeData('', 'settings.json', { tableSize: 'default' });
+
+    setProfileId('sqlite-abc');
+    expect(await ensureFile('', 'settings.json')).toBe(true);
+    await writeData('', 'settings.json', { tableSize: 'large' });
+    expect(
+      localStorage.getItem('pdd-store:browser://appdata/profiles/sqlite-abc/settings.json'),
+    ).toBeTruthy();
+    expect(await readData('', 'settings.json')).toEqual({ tableSize: 'large' });
+
+    setProfileId('');
+    expect(await readData('', 'settings.json')).toEqual({ tableSize: 'default' });
   });
 });

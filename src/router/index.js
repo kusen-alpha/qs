@@ -11,6 +11,7 @@ const routes = [
   { path: '/group', name: 'group', component: () => import('../views/Group.vue') },
   { path: '/market', name: 'market', component: () => import('../views/MarketWidth.vue') },
   { path: '/calendar', name: 'calendar', component: () => import('../views/Calendar.vue') },
+  { path: '/check', name: 'check', component: () => import('../views/Check.vue') },
   {
     path: '/boardchart',
     name: 'boardChart',
@@ -33,6 +34,7 @@ const PAGE_CLASS = {
   group: 'group',
   market: 'market',
   calendar: 'calendar',
+  check: 'check',
   // 板块/概念图表页沿用看盘页的样式前缀（左侧菜单 + 右侧图表）
   boardChart: 'detail',
 };

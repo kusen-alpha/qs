@@ -58,6 +58,15 @@ describe('Monitor 视图 · 顶部 tab', () => {
     expect(wrapper.find('.monitor-placeholder').exists()).toBe(false);
   });
 
+  it('顶部工具栏包含数据校验按钮，位于最大化按钮左侧', () => {
+    const { wrapper } = mountMonitor();
+    expect(wrapper.find('.monitor-check .check-trigger').exists()).toBe(true);
+    expect(wrapper.find('.monitor-check .check-trigger').attributes('title')).toBe('数据校验');
+    const headerButtons = wrapper.find('.monitor-header').findAll('button');
+    expect(headerButtons[0].classes()).toContain('check-trigger');
+    expect(headerButtons[1].classes()).toContain('window-max-button');
+  });
+
   it('透明度与灰度写入卡片样式', async () => {
     const { wrapper, setting } = mountMonitor();
     setting.viewOpacity = 20;

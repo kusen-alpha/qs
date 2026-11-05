@@ -17,6 +17,7 @@
         @click="switchTab(tab.key)"
         >{{ tab.label }}</span
       >
+      <CheckButton class="monitor-check" />
       <WindowMaxButton
         class="monitor-max"
         :size="20"
@@ -55,6 +56,7 @@ import SectorTable from '../components/monitor/SectorTable.vue';
 import MarketPanel from '../components/market/MarketPanel.vue';
 import CalendarTable from '../components/monitor/CalendarTable.vue';
 import Iconbar from '../components/monitor/Iconbar.vue';
+import CheckButton from '../components/monitor/CheckButton.vue';
 import WindowMaxButton from '../components/WindowMaxButton.vue';
 import { useSettingStore } from '../stores/setting';
 import { isTauri } from '../utils/env';
@@ -279,8 +281,11 @@ onBeforeUnmount(() => {
   gap: 10px;
   padding: 0 4px;
 }
-.monitor-header :deep(.monitor-max) {
+.monitor-header :deep(.monitor-check) {
   margin-left: auto;
+}
+.monitor-header :deep(.monitor-max) {
+  margin-left: 0;
 }
 .monitor-header :deep(.monitor-max .el-icon) {
   font-size: 18px;

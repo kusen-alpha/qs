@@ -431,6 +431,28 @@ export async function getDbSetupState() {
   }
 }
 
+/** 准备 SQLite 数据库文件：不存在则新建（含表结构），用于选择目录后立即就绪 */
+export async function prepareSqlite(path) {
+  if (!isTauri() || !path) return { ok: false, message: '未指定数据库文件' };
+  try {
+    return await invoke('db_prepare_sqlite', { path });
+  } catch (e) {
+    return { ok: false, message: String(e) };
+  }
+}
+
+/** 列出目录下的 SQLite 数据库文件名（向导选择目录后自动识别），浏览器环境返回空数组 */
+export async function listSqliteFiles(dir) {
+  if (!isTauri() || !dir) return [];
+  try {
+    const data = await invoke('db_sqlite_files', { dir });
+    return (data && data.files) || [];
+  } catch (e) {
+    console.error('[db] 读取目录数据库文件失败', e);
+    return [];
+  }
+}
+
 /** 测试数据库连接（SQLite 文件或 MySQL 连接信息） */
 export async function testDbConnection(config) {
   if (!isTauri()) return { ok: true, message: '浏览器模式无需配置数据库' };

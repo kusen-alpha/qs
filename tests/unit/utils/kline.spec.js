@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   buildKlineUrl,
   fallbackKline,
+  fetchKline,
   fetchKlineRange,
   parseKlines,
   parseTencentKlines,
@@ -61,6 +62,13 @@ describe('kline 工具', () => {
     expect(list[1].turnover_ratio).toBe(0);
   });
 
+  it('parseKlines 成交量/成交额缺失时返回 null 而不是 NaN', () => {
+    const list = parseKlines(['2024-01-02,10.00,10.50,10.80,9.90,-,-']);
+    expect(list).toHaveLength(1);
+    expect(list[0].volume).toBe(null);
+    expect(list[0].amount).toBe(null);
+  });
+
   it('parseKlines 入参为空时返回空数组', () => {
     expect(parseKlines()).toEqual([]);
     expect(parseKlines([])).toEqual([]);
@@ -86,9 +94,12 @@ describe('kline 工具', () => {
     expect(fallbackKline('1.600519')[0].open).not.toBe(fallbackKline('0.000001')[0].open);
   });
 
-  it('secidToTencentSymbol 按市场拼接 sh/sz', () => {
+  it('secidToTencentSymbol 按市场拼接 sh/sz/bj', () => {
     expect(secidToTencentSymbol('1.600519')).toBe('sh600519');
     expect(secidToTencentSymbol('0.000001')).toBe('sz000001');
+    expect(secidToTencentSymbol('0.920002')).toBe('bj920002');
+    expect(secidToTencentSymbol('0.430047')).toBe('bj430047');
+    expect(secidToTencentSymbol('0.835185')).toBe('bj835185');
     expect(secidToTencentSymbol('600519')).toBe('600519');
   });
 
@@ -208,5 +219,64 @@ describe('kline 工具', () => {
     vi.unstubAllGlobals();
 
     expect(res).toBe(null);
+  });
+
+  it('行情源只返回近期窗口时自动补拉 2024 年以来的历史', async () => {
+    const recent = [
+      ['2025-09-29', '10.00', '10.10', '10.20', '9.90', '1000.00', {}, '0.20', '100.00', ''],
+      ['2025-09-30', '10.10', '10.20', '10.30', '10.00', '1100.00', {}, '0.22', '110.00', ''],
+    ];
+    const older = [
+      ['2024-01-02', '8.00', '8.10', '8.20', '7.90', '900.00', {}, '0.10', '90.00', ''],
+      ['2024-01-03', '8.10', '8.20', '8.30', '8.00', '950.00', {}, '0.11', '95.00', ''],
+    ];
+    const urls = [];
+    let firstFullChunk = true;
+    vi.stubGlobal('fetch', async (url) => {
+      const text = String(url);
+      if (text.includes('push2his')) throw new Error('blocked');
+      urls.push(text);
+      // 模拟数据源截断：首次请求 2024 年分段只返回近期窗口；补拉时才返回更早历史
+      const param = decodeURIComponent(text.split('param=')[1] || '');
+      let rows = recent;
+      if (param.startsWith('sh600519,day,2024-01-01')) {
+        rows = firstFullChunk ? recent : older;
+        firstFullChunk = false;
+      }
+      return { ok: true, text: async () => JSON.stringify({ data: { sh600519: { qfqday: rows } } }) };
+    });
+    const res = await fetchKline('1.600519');
+    vi.unstubAllGlobals();
+
+    expect(res.candles.map((candle) => candle.date)).toEqual([
+      '2024-01-02',
+      '2024-01-03',
+      '2025-09-29',
+      '2025-09-30',
+    ]);
+    // 补拉更早区间会再次请求 2024 年分段
+    const chunks2024 = urls.filter((url) => decodeURIComponent(url).includes('sh600519,day,2024-01-01'));
+    expect(chunks2024.length).toBe(2);
+  });
+
+  it('行情源已覆盖 2024-01-01 时不再补拉', async () => {
+    const rows = [
+      ['2024-01-02', '8.00', '8.10', '8.20', '7.90', '900.00', {}, '0.10', '90.00', ''],
+      ['2024-01-03', '8.10', '8.20', '8.30', '8.00', '950.00', {}, '0.11', '95.00', ''],
+    ];
+    const urls = [];
+    vi.stubGlobal('fetch', async (url) => {
+      const text = String(url);
+      if (text.includes('push2his')) throw new Error('blocked');
+      urls.push(text);
+      return { ok: true, text: async () => JSON.stringify({ data: { sh600519: { qfqday: rows } } }) };
+    });
+    const res = await fetchKline('1.600519');
+    vi.unstubAllGlobals();
+
+    expect(res.candles.map((candle) => candle.date)).toEqual(['2024-01-02', '2024-01-03']);
+    // 已覆盖起点，不应再补拉 2024 年分段
+    const chunks2024 = urls.filter((url) => decodeURIComponent(url).includes('sh600519,day,2024-01-01'));
+    expect(chunks2024.length).toBe(1);
   });
 });

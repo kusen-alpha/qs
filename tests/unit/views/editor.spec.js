@@ -7,7 +7,7 @@ import WindowMaxButton from '@/components/WindowMaxButton.vue';
 const { closeWindow, WindowConfigs, applyDragRegion } = vi.hoisted(() => ({
   closeWindow: vi.fn(),
   applyDragRegion: vi.fn(),
-  WindowConfigs: { search: { label: 'search' }, concept: { label: 'concept' } },
+  WindowConfigs: { search: { label: 'search' } },
 }));
 
 vi.mock('@/utils/windows', () => ({ closeWindow, WindowConfigs }));

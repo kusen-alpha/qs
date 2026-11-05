@@ -48,7 +48,8 @@
     ],
     "windows": {
       "nsis": {
-        "installMode": "currentUser"
+        "installMode": "currentUser",
+        "template": "nsis/installer.nsi"
       },
       "webviewInstallMode": {
         "type": "downloadBootstrapper",

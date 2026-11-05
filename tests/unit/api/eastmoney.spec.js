@@ -34,6 +34,13 @@ describe('eastmoney · 实时行情映射', () => {
     expect(api.processRealtimeData(null)).toEqual([]);
     expect(api.processRealtimeData([])).toEqual([]);
   });
+
+  it('processRealtimeData 映射交易所行情时间 f86，供后端判断当天是否真的刷新过', () => {
+    const [row] = api.processRealtimeData([
+      { f12: '600519', f13: 1, f14: '贵州茅台', f2: 1500, f86: 1762300200 },
+    ]);
+    expect(row.time).toBe(1762300200);
+  });
 });
 
 describe('eastmoney · 组合与持仓计算', () => {
@@ -95,6 +102,17 @@ describe('eastmoney · 组合与持仓计算', () => {
     expect(sum.total_profit_rate).toBeCloseTo(10400 / (150000 + 2000));
     expect(sum.today_profit_rate).toBeCloseTo(900 / (159000 + 2500));
   });
+
+  it('summarizeProfit 当天平盘（涨跌额为 0）的持仓仍计入总盈亏', () => {
+    const quotes = [{ secid: '1.600519', price: 1600, price_diff: 0 }];
+    const configs = [{ secid: '1.600519', position: { buyPrice: 1500, buyAmount: 100 } }];
+    const sum = summarizeProfit(quotes, configs);
+    expect(sum.total_profit).toBe(10000);
+    expect(sum.total_cost).toBe(150000);
+    expect(sum.today_profit).toBe(0);
+    expect(sum.total_profit_rate).toBeCloseTo(10000 / 150000);
+    expect(sum.today_profit_rate).toBe((0 / 160000));
+  });
 });
 
 describe('eastmoney · 格式化', () => {
@@ -109,6 +127,9 @@ describe('eastmoney · 格式化', () => {
     expect(formatAmount(12345)).toBe('1.2万');
     expect(formatAmount(123456)).toBe('12万');
     expect(formatAmount(123456789)).toBe('1.23亿');
+    // 停牌/缺行情时价格为 '-'，toNumber 得到 NaN，不能显示成 NaN亿
+    expect(formatAmount(NaN)).toBe('-');
+    expect(formatAmount(undefined)).toBe('-');
   });
 
   it('formatRate 收益率', () => {
@@ -116,5 +137,7 @@ describe('eastmoney · 格式化', () => {
     expect(formatRate(12.345)).toBe('12.35倍');
     expect(formatRate(1234.5)).toBe('1235倍');
     expect(formatRate(100000)).toBe('>10万倍');
+    // NaN 曾因比较全为 false 而落到「>10万倍」分支
+    expect(formatRate(NaN)).toBe('-');
   });
 });

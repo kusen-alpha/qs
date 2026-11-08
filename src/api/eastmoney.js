@@ -54,12 +54,17 @@ export class EastmoneyApi {
       open: a.f17,
       pre_close: a.f18,
       // 交易所最后成交时间（秒）：非交易日/停牌时仍停留在上一个交易日，
-      // 用于区分「今天真的刷新过行情」与「只是本地又请求了一次」
-      time: a.f86,
+      // 用于区分「今天真的刷新过行情」与「只是本地又请求了一次」。
+      // 注意 f124 才是时间戳，f86 在本接口返回的是别的数值（会是 34.58 这类小数）
+      time: a.f124,
     }));
   }
 
-  async realtime(list) {
+  /**
+   * @param {Array} list 待查询标的
+   * @param {boolean} save 是否把行情写回 stocks（非交易日探测只需读取，避免把探针股写入自选库）
+   */
+  async realtime(list, save = true) {
     if (!list.length) return [];
     const params = {
       pn: '1',
@@ -72,7 +77,7 @@ export class EastmoneyApi {
       fid: 'f3',
       fs: 'm:0 t:6,m:0 t:80,m:1 t:2,m:1 t:23,m:0 t:81 s:2048',
       fields:
-        'f1,f2,f3,f4,f5,f6,f7,f8,f9,f10,f12,f13,f14,f15,f16,f17,f18,f20,f21,f23,f24,f25,f22,f11,f62,f115,f152,f86',
+        'f1,f2,f3,f4,f5,f6,f7,f8,f9,f10,f12,f13,f14,f15,f16,f17,f18,f20,f21,f23,f24,f25,f22,f11,f62,f115,f152,f86,f124',
       secids: list.map((s) => s.secid).join(','),
       _: '1623833739532',
     };
@@ -84,7 +89,7 @@ export class EastmoneyApi {
     if (res.ok && res.data && res.data.data) {
       const list = this.processRealtimeData(res.data.data.diff);
       // 每轮刷新都写库；失败不影响行情展示
-      saveQuotes(list);
+      if (save) saveQuotes(list);
       return list;
     }
     return [];

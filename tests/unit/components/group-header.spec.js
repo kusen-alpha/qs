@@ -1,10 +1,19 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { nextTick } from 'vue';
 import { mount } from '@vue/test-utils';
 import ElementPlus from 'element-plus';
 import GroupHeader from '@/components/group/GroupHeader.vue';
 import { useCacheStore } from '@/stores/cache';
 import { concept, freshPinia, stock } from '../../helpers';
+
+const wrappers = [];
+
+afterEach(async () => {
+  wrappers.splice(0).forEach((wrapper) => wrapper.unmount());
+  // Element Plus 弹窗卸载后会延迟 200ms 才恢复 body 样式，
+  // 必须等这个定时器跑完，否则环境销毁后回调访问 document 会抛未捕获异常
+  await new Promise((resolve) => setTimeout(resolve, 240));
+});
 
 function mountHeader(selectGroup) {
   freshPinia();
@@ -22,6 +31,7 @@ function mountHeader(selectGroup) {
       },
     },
   });
+  wrappers.push(wrapper);
   return { wrapper, cache };
 }
 

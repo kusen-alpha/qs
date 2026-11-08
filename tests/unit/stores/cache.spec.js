@@ -188,6 +188,25 @@ describe('cache store · 两级概念', () => {
     cache.deleteSymbols([stock('000858'), stock('600036')], 2);
     expect(cache.findConceptById(2).symbols.map((s) => s.symbol)).toEqual(['601318']);
   });
+
+  it('delSymbol 按 secid 匹配，不会误删同 6 位代码的其他市场股票', () => {
+    cache.findConceptById(2).symbols.push(
+      stock('000001', '平安银行', '0.000001'),
+      stock('000001', '上证指数', '1.000001'),
+    );
+    cache.deleteSymbols([stock('000001', '上证指数', '1.000001')], 2);
+    expect(cache.findConceptById(2).symbols.map((s) => s.secid)).toContain('0.000001');
+    expect(cache.findConceptById(2).symbols.map((s) => s.secid)).not.toContain('1.000001');
+  });
+
+  it('删除自选分组的股票时同步从所有概念移除', () => {
+    cache.group[1].symbols.push(stock('600519', '贵州茅台'));
+    cache.findConceptById(2).symbols.push(stock('600519', '贵州茅台'));
+    cache.deleteSymbols([stock('600519', '贵州茅台')], 0);
+    expect(cache.findConceptById(0).symbols).toEqual([]);
+    expect(cache.findConceptById(1).symbols).toEqual([]);
+    expect(cache.findConceptById(2).symbols.map((s) => s.symbol)).toEqual(['000858']);
+  });
 });
 
 describe('cache store · 设置与盈亏', () => {

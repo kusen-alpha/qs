@@ -70,7 +70,7 @@
     class="item-change-dialog"
     width="60%"
   >
-    <GroupDeleteDialog :name="current.name" />
+    <GroupDeleteDialog :name="current.name" :child-count="(current.children || []).length" />
     <template #footer>
       <span class="dialog-footer">
         <el-button @click="deleteVisible = false">取消</el-button>

@@ -1,70 +1,62 @@
 import { createPinia } from 'pinia';
-import piniaPluginPersistedstate from 'pinia-plugin-persistedstate';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { invoke } from '@tauri-apps/api/core';
 import { ensureMarketWidthHistory } from '../api/legulegu';
 import { isTauri } from '../utils/env';
-import { ensureFile, readData, writeData, Files } from '../utils/file';
-import { migrateWatchGroup, refreshBoardHistory } from '../utils/db';
+import { legacyExists, readLegacyData, removeLegacyFiles, Files } from '../utils/file';
+import { importLegacy, refreshBoardHistory } from '../utils/db';
 import { syncWatchHistory } from '../utils/klineSync';
+import { startNonTradingCalendar } from '../utils/nonTrading';
 import { useSettingStore } from './setting';
 import { useMonitorStore } from './monitor';
 import { useSymbolStore } from './symbol';
 
 export const pinia = createPinia();
-pinia.use(piniaPluginPersistedstate);
 
-/** 首次创建数据文件，否则读取并回填 store */
-async function hydrateStore(initialState, folder, file, store, encrypt) {
-  const created = await ensureFile(folder, file);
-  if (created) {
-    await writeData(folder, file, initialState, encrypt);
-    return;
+/**
+ * 旧版 profile 文件一次性迁入数据库：仅主窗口执行。
+ * 命令成功后才删除旧文件；失败保留文件，下次启动重试。
+ */
+async function migrateLegacyFiles() {
+  try {
+    const existsList = await Promise.all([
+      legacyExists(Files.SETTINGS.file),
+      legacyExists(Files.SYMBOL.file),
+      legacyExists(Files.MONITOR.file),
+    ]);
+    if (!existsList.some(Boolean)) return;
+    const [settings, symbolState, monitorState] = await Promise.all([
+      readLegacyData(Files.SETTINGS.file, false),
+      readLegacyData(Files.SYMBOL.file, true),
+      readLegacyData(Files.MONITOR.file, true),
+    ]);
+    const result = await importLegacy({
+      settings,
+      symbolConfigs: symbolState ? symbolState.configs : null,
+      groups: monitorState ? monitorState.watchGroup : null,
+    });
+    // 返回 null 表示导入失败（或非 Tauri 环境），此时不删除旧文件
+    if (!result) return;
+    await removeLegacyFiles();
+  } catch (e) {
+    console.error('[legacy] 旧版数据迁移失败', e);
   }
-  const data = await readData(folder, file, encrypt);
-  if (!data) return;
-  for (const key in data) {
-    store.$state[key] = data[key];
-  }
-  store.$persist();
 }
 
-/** 仅主窗口负责磁盘数据初始化 */
+/** 所有窗口都从数据库回填；主窗口额外负责磁盘数据初始化与启动任务 */
 export async function initStores() {
   if (!isTauri()) return;
   const current = getCurrentWindow();
-  if (current.label !== 'main') return;
+  const isMain = current.label === 'main';
 
   const setting = useSettingStore();
   const monitor = useMonitorStore();
   const symbol = useSymbolStore();
 
-  await hydrateStore(
-    JSON.parse(JSON.stringify(setting.$state)),
-    Files.SETTINGS.folder,
-    Files.SETTINGS.file,
-    setting,
-    Files.SETTINGS.encrpt,
-  );
-  await hydrateStore(
-    JSON.parse(JSON.stringify(monitor.$state)),
-    Files.MONITOR.folder,
-    Files.MONITOR.file,
-    monitor,
-    Files.MONITOR.encrpt,
-  );
-  await hydrateStore(
-    JSON.parse(JSON.stringify(symbol.$state)),
-    Files.SYMBOL.folder,
-    Files.SYMBOL.file,
-    symbol,
-    Files.SYMBOL.encrpt,
-  );
+  if (isMain) await migrateLegacyFiles();
+  await Promise.all([setting.loadFromDb(), symbol.loadFromDb(), monitor.loadFromDb()]);
 
-  // 旧版自选/概念一次性入库；Rust 侧用 meta.migrated_v1 保证只执行一次
-  await migrateWatchGroup(JSON.parse(JSON.stringify(monitor.watchGroup)));
-  // 之后以数据库为准回填自选与概念
-  await monitor.loadFromDb();
+  if (!isMain) return;
 
   // 启动时补齐自选日K，延后执行避免抢占首次行情刷新；
   // 补齐完成后再幂等刷新板块日线（已有数据增量补最近 5 个交易日）
@@ -81,6 +73,11 @@ export async function initStores() {
       console.error('[marketWidth] 市场宽度历史补齐失败', e),
     );
   }, 5000);
+
+  // 非交易日日历：后台回填历史非交易日并监听盘中探测信号，不阻塞首屏
+  startNonTradingCalendar().catch((e) =>
+    console.error('[probe] 非交易日任务启动失败', e),
+  );
 
   // 开机自启状态与设置对齐
   try {

@@ -3,10 +3,10 @@
     windows_subsystem = "windows"
 )]
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use aes_gcm::aead::{Aead, KeyInit};
 use aes_gcm::{Aes256Gcm, Nonce};
@@ -19,7 +19,7 @@ use serde_json::{json, Value};
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    Manager, State, WindowEvent,
+    Manager, State, WindowEvent, Emitter,
 };
 
 const APP_VERSION: &str = env!("QS_VERSION");
@@ -252,6 +252,8 @@ CREATE TABLE IF NOT EXISTS stocks (
     open REAL,
     high REAL,
     low REAL,
+    pre_close REAL,
+    price_diff REAL,
     ratio REAL,
     amount REAL,
     turnover_ratio REAL,
@@ -347,6 +349,27 @@ CREATE TABLE IF NOT EXISTS calendar_events (
     updated_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS ix_calendar_events_start ON calendar_events(start_date);
+
+/* 软件设置：数据库为唯一持久化来源，key='setting' 存整份设置 JSON */
+CREATE TABLE IF NOT EXISTS app_settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    updated_at INTEGER NOT NULL DEFAULT 0
+);
+
+/* 个股持仓/提醒配置：每只股票一行，config 为整份配置 JSON */
+CREATE TABLE IF NOT EXISTS symbol_configs (
+    secid TEXT PRIMARY KEY,
+    config TEXT NOT NULL,
+    updated_at INTEGER NOT NULL DEFAULT 0
+);
+
+/* 非交易日：只记录休市日期（含周末），交易日 = 周一至周五 - 本表日期 */
+CREATE TABLE IF NOT EXISTS non_trading_days (
+    date TEXT PRIMARY KEY,
+    source TEXT NOT NULL,
+    confirmed_at INTEGER NOT NULL DEFAULT 0
+);
 
 CREATE TABLE IF NOT EXISTS meta (
     key TEXT PRIMARY KEY,
@@ -840,6 +863,8 @@ CREATE TABLE IF NOT EXISTS stocks (
     open DOUBLE,
     high DOUBLE,
     low DOUBLE,
+    pre_close DOUBLE,
+    price_diff DOUBLE,
     ratio DOUBLE,
     amount DOUBLE,
     turnover_ratio DOUBLE,
@@ -942,6 +967,27 @@ CREATE TABLE IF NOT EXISTS calendar_events (
     KEY ix_calendar_events_start (start_date)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
+CREATE TABLE IF NOT EXISTS app_settings (
+    `key` VARCHAR(191) NOT NULL,
+    value LONGTEXT NOT NULL,
+    updated_at BIGINT NOT NULL DEFAULT 0,
+    PRIMARY KEY (`key`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS symbol_configs (
+    secid VARCHAR(191) NOT NULL,
+    config LONGTEXT NOT NULL,
+    updated_at BIGINT NOT NULL DEFAULT 0,
+    PRIMARY KEY (secid)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS non_trading_days (
+    `date` VARCHAR(16) NOT NULL,
+    source VARCHAR(32) NOT NULL,
+    confirmed_at BIGINT NOT NULL DEFAULT 0,
+    PRIMARY KEY (`date`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
 CREATE TABLE IF NOT EXISTS meta (
     `key` VARCHAR(191) NOT NULL,
     value TEXT NOT NULL,
@@ -950,8 +996,8 @@ CREATE TABLE IF NOT EXISTS meta (
 "#;
 
 const MYSQL_VERSION_SQL: &str =
-    "INSERT INTO meta (`key`, value) VALUES ('schema_version', '16') \
-     ON DUPLICATE KEY UPDATE value = '16'";
+    "INSERT INTO meta (`key`, value) VALUES ('schema_version', '19') \
+     ON DUPLICATE KEY UPDATE value = '19'";
 
 #[derive(Serialize, Deserialize, Clone, Default)]
 struct SqliteSettings {
@@ -1265,6 +1311,17 @@ fn init_mysql(config: &MysqlConnSettings) -> Result<mysql::Pool, String> {
         .map_err(|e| format!("MySQL 连接数据库失败: {e}"))?;
     conn.query_drop(MYSQL_SCHEMA_SQL)
         .map_err(|e| format!("MySQL 建表失败: {e}"))?;
+    // 兼容旧库：stocks 补 pre_close / price_diff。MySQL 无 ADD COLUMN IF NOT EXISTS，
+    // 已存在时报 1060（Duplicate column name），忽略即可
+    for column in ["pre_close", "price_diff"] {
+        let sql = format!("ALTER TABLE stocks ADD COLUMN {column} DOUBLE");
+        if let Err(err) = conn.query_drop(&sql) {
+            match &err {
+                mysql::Error::MySqlError(e) if e.code == 1060 => {}
+                _ => return Err(format!("MySQL 补列失败: {err}")),
+            }
+        }
+    }
     conn.query_drop(MYSQL_VERSION_SQL)
         .map_err(|e| format!("MySQL 写入版本失败: {e}"))?;
     drop(conn);
@@ -1553,6 +1610,19 @@ fn init_sqlite(path: &Path) -> Result<Connection, String> {
     if has_price_columns == 0 {
         conn.execute_batch(STOCKS_PRICE_SQL)?;
     }
+    // 兼容 v18 及更早：stocks 补存昨收与涨跌额，库优先展示时不再反推
+    for column in ["pre_close", "price_diff"] {
+        let exists: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('stocks') WHERE name = ?1",
+                [column],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+        if exists == 0 {
+            conn.execute_batch(&format!("ALTER TABLE stocks ADD COLUMN {column} REAL;"))?;
+        }
+    }
     // 兼容旧库：histories 含 adjust 列时重建（固定前复权，amount 元转亿）
     let has_adjust_column: i64 = conn
         .query_row(
@@ -1677,8 +1747,12 @@ fn init_sqlite(path: &Path) -> Result<Connection, String> {
     }
     // v14 -> v15：新增 sckd（市场宽度落库），表由 SCHEMA_SQL 幂等创建
     // v15 -> v16：新增 calendar_events（日历事件），表由 SCHEMA_SQL 幂等创建
+    // v16 -> v17：新增 app_settings / symbol_configs（设置与持仓提醒改为数据库唯一来源），
+    // 表由 SCHEMA_SQL 幂等创建
+    // v17 -> v18：新增 non_trading_days（非交易日日历），表由 SCHEMA_SQL 幂等创建
+    // v18 -> v19：stocks 补 pre_close / price_diff（上面已幂等 ALTER），行情可纯读库展示
     conn.execute(
-        "INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', '16')",
+        "INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', '19')",
         [],
     )?;
     Ok(conn)
@@ -1725,14 +1799,16 @@ fn upsert_stock(
          ON CONFLICT(secid) DO UPDATE SET
              name = CASE WHEN excluded.name = '' THEN stocks.name ELSE excluded.name END,
              zx = MAX(stocks.zx, excluded.zx),
-             updated_at = excluded.updated_at",
+             updated_at = MAX(COALESCE(stocks.updated_at, 0), excluded.updated_at)",
         "INSERT INTO stocks (secid, name, zx, updated_at)
          VALUES (?1, ?2, ?3, ?4)
          ON DUPLICATE KEY UPDATE
              name = CASE WHEN VALUES(name) = '' THEN stocks.name ELSE VALUES(name) END,
              zx = GREATEST(stocks.zx, VALUES(zx)),
-             updated_at = VALUES(updated_at)",
-        p![secid, name, zx as i64, now_ms()],
+             updated_at = GREATEST(COALESCE(stocks.updated_at, 0), VALUES(updated_at))",
+        // 新增自选/概念成分不是行情刷新，updated_at 用 0（未知）；
+        // 否则非交易日盘中会被 db_load_today_candle 误判为「今天有成交」并合成假当日K线。
+        p![secid, name, zx as i64, 0i64],
     )?;
     Ok(())
 }
@@ -1862,6 +1938,13 @@ fn sync_self_boards(conn: &mut dyn SqlSession) -> Result<(), String> {
     Ok(())
 }
 
+fn count_table(conn: &mut dyn SqlSession, table: &str) -> Result<i64, String> {
+    conn.query_one(&format!("SELECT COUNT(*) FROM {table}"), vec![])?
+        .ok_or_else(|| "统计查询失败".to_string())?
+        .get::<_, i64>(0)
+        .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 fn app_info() -> serde_json::Value {
     serde_json::json!({
@@ -1938,49 +2021,685 @@ fn fill_watchgroup(
     Ok((stock_count, notion_count, member_count))
 }
 
-/// 把旧版 monitor.dat 中的自选/概念一次性导入 stocks.db（幂等，只执行一次）
+/// 读取软件设置；数据库为唯一来源，无记录时返回 null
 #[tauri::command]
-fn db_migrate_watchgroup(state: State<'_, Db>, groups: String) -> Result<Value, String> {
-    let payload: Value =
-        serde_json::from_str(&groups).map_err(|e| format!("解析自选数据失败: {e}"))?;
-
-    let outcome = state.with_tx(|conn| {
-        let migrated = conn
+fn db_load_settings(state: State<'_, Db>) -> Result<Value, String> {
+    let text = state.with_conn(|conn| {
+        Ok(conn
             .query_one_d(
-                "SELECT value FROM meta WHERE key = 'migrated_v1'",
-                "SELECT value FROM meta WHERE `key` = 'migrated_v1'",
+                "SELECT value FROM app_settings WHERE key = 'setting'",
+                "SELECT value FROM app_settings WHERE `key` = 'setting'",
+                vec![],
+            )?
+            .map(|row| row.get::<_, String>(0).map_err(|e| e.to_string()))
+            .transpose()?)
+    })?;
+    let settings = match text {
+        Some(text) => serde_json::from_str(&text).map_err(|e| format!("解析设置失败: {e}"))?,
+        None => Value::Null,
+    };
+    Ok(json!({ "settings": settings }))
+}
+
+/// 保存整份软件设置
+#[tauri::command]
+fn db_save_settings(state: State<'_, Db>, payload: String) -> Result<Value, String> {
+    let payload: Value =
+        serde_json::from_str(&payload).map_err(|e| format!("解析设置失败: {e}"))?;
+    state.with_tx(|conn| {
+        conn.execute_d(
+            "INSERT OR REPLACE INTO app_settings (key, value, updated_at) VALUES ('setting', ?1, ?2)",
+            "INSERT INTO app_settings (`key`, value, updated_at) VALUES ('setting', ?1, ?2)
+             ON DUPLICATE KEY UPDATE value = VALUES(value), updated_at = VALUES(updated_at)",
+            p![payload.to_string(), now_ms()],
+        )?;
+        Ok(())
+    })?;
+    Ok(json!({ "saved": true }))
+}
+
+/// 读取全部个股持仓/提醒配置
+#[tauri::command]
+fn db_load_symbol_configs(state: State<'_, Db>) -> Result<Value, String> {
+    let rows = state.with_conn(|conn| {
+        conn.query_d(
+            "SELECT secid, config FROM symbol_configs",
+            "SELECT secid, config FROM symbol_configs",
+            vec![],
+        )
+    })?;
+    let mut configs = serde_json::Map::new();
+    for row in rows {
+        let secid: String = row.get(0).map_err(|e| e.to_string())?;
+        let text: String = row.get(1).map_err(|e| e.to_string())?;
+        let config: Value =
+            serde_json::from_str(&text).map_err(|e| format!("解析持仓配置失败: {e}"))?;
+        configs.insert(secid, config);
+    }
+    Ok(json!({ "configs": Value::Object(configs) }))
+}
+
+/// 整份覆盖保存个股持仓/提醒配置
+#[tauri::command]
+fn db_save_symbol_configs(state: State<'_, Db>, payload: String) -> Result<Value, String> {
+    let payload: Value =
+        serde_json::from_str(&payload).map_err(|e| format!("解析持仓配置失败: {e}"))?;
+    let configs = payload.as_object().cloned().unwrap_or_default();
+    state.with_tx(|conn| {
+        conn.execute_d(
+            "DELETE FROM symbol_configs",
+            "DELETE FROM symbol_configs",
+            vec![],
+        )?;
+        let now = now_ms();
+        for (secid, config) in configs.iter() {
+            conn.execute_d(
+                "INSERT INTO symbol_configs (secid, config, updated_at) VALUES (?1, ?2, ?3)",
+                "INSERT INTO symbol_configs (secid, config, updated_at) VALUES (?1, ?2, ?3)",
+                p![secid.clone(), config.to_string(), now],
+            )?;
+        }
+        Ok(())
+    })?;
+    Ok(json!({ "saved": true }))
+}
+
+/// 旧版数据导入的事务内逻辑；已导入过时返回 None。
+/// 返回 (settings 条数, symbol 条数, (股票数, 概念数, 成员数))
+#[allow(clippy::type_complexity)]
+fn import_legacy_data(
+    conn: &mut dyn SqlSession,
+    payload: &Value,
+) -> Result<Option<(i64, i64, (i64, i64, i64))>, String> {
+    let imported = conn
+        .query_one_d(
+            "SELECT value FROM meta WHERE key = 'legacy_imported'",
+            "SELECT value FROM meta WHERE `key` = 'legacy_imported'",
+            vec![],
+        )?
+        .is_some();
+    if imported {
+        return Ok(None);
+    }
+
+    let mut settings_count = 0;
+    let mut symbol_count = 0;
+    let mut watch_counts = (0i64, 0i64, 0i64);
+
+    if let Some(settings) = payload.get("settings").filter(|value| !value.is_null()) {
+        let exists = conn
+            .query_one_d(
+                "SELECT value FROM app_settings WHERE key = 'setting'",
+                "SELECT value FROM app_settings WHERE `key` = 'setting'",
                 vec![],
             )?
             .is_some();
-        if migrated {
-            return Ok(None);
+        if !exists {
+            conn.execute_d(
+                "INSERT OR REPLACE INTO app_settings (key, value, updated_at) VALUES ('setting', ?1, ?2)",
+                "INSERT INTO app_settings (`key`, value, updated_at) VALUES ('setting', ?1, ?2)
+                 ON DUPLICATE KEY UPDATE value = VALUES(value), updated_at = VALUES(updated_at)",
+                p![settings.to_string(), now_ms()],
+            )?;
+            settings_count = 1;
         }
+    }
 
-        let counts = fill_watchgroup(conn, &payload)?;
-        sync_self_boards(conn)?;
-        conn.execute_d(
-            "INSERT OR REPLACE INTO meta (key, value) VALUES ('migrated_v1', ?1)",
-            "INSERT INTO meta (`key`, value) VALUES ('migrated_v1', ?1)
-             ON DUPLICATE KEY UPDATE value = VALUES(value)",
-            p![now_ms().to_string()],
-        )?;
-        Ok(Some(counts))
-    })?;
+    if let Some(configs) = payload.get("symbol_configs").and_then(|value| value.as_object()) {
+        let exists = count_table(conn, "symbol_configs")?;
+        if exists == 0 && !configs.is_empty() {
+            let now = now_ms();
+            for (secid, config) in configs.iter() {
+                conn.execute_d(
+                    "INSERT INTO symbol_configs (secid, config, updated_at) VALUES (?1, ?2, ?3)",
+                    "INSERT INTO symbol_configs (secid, config, updated_at) VALUES (?1, ?2, ?3)",
+                    p![secid.clone(), config.to_string(), now],
+                )?;
+                symbol_count += 1;
+            }
+        }
+    }
 
-    let Some((stock_count, notion_count, member_count)) = outcome else {
-        return Ok(json!({ "migrated": false, "skipped": true }));
+    if let Some(groups) = payload.get("groups").and_then(|value| value.as_array()) {
+        let watched = conn
+            .query_one("SELECT COUNT(*) FROM stocks WHERE zx = 1", vec![])?
+            .map(|row| row.get::<_, i64>(0).unwrap_or(0))
+            .unwrap_or(0);
+        let notions = count_table(conn, "notions")?;
+        if watched == 0 && notions == 0 && !groups.is_empty() {
+            watch_counts = fill_watchgroup(conn, &Value::Array(groups.clone()))?;
+            sync_self_boards(conn)?;
+        }
+    }
+
+    conn.execute_d(
+        "INSERT OR REPLACE INTO meta (key, value) VALUES ('legacy_imported', ?1)",
+        "INSERT INTO meta (`key`, value) VALUES ('legacy_imported', ?1)
+         ON DUPLICATE KEY UPDATE value = VALUES(value)",
+        p![now_ms().to_string()],
+    )?;
+    Ok(Some((settings_count, symbol_count, watch_counts)))
+}
+
+/// 旧版 profile 文件（settings.json / symbol.dat / monitor.dat）一次性迁入数据库。
+/// 各来源仅在库内为空时导入，成功后写 meta.legacy_imported 保证只执行一次；
+/// 前端在命令成功后删除旧文件。
+#[tauri::command]
+fn db_import_legacy(state: State<'_, Db>, payload: String) -> Result<Value, String> {
+    let payload: Value =
+        serde_json::from_str(&payload).map_err(|e| format!("解析旧版数据失败: {e}"))?;
+
+    let outcome = state.with_tx(|conn| import_legacy_data(conn, &payload))?;
+
+    let Some((settings_count, symbol_count, (stock_count, notion_count, member_count))) = outcome
+    else {
+        return Ok(json!({ "imported": false, "skipped": true }));
     };
 
-    // 自建概念成分入库后整段重算板块历史（成分变化会让历史涨跌幅整体变化）
-    let (board_count, board_rows) = state
-        .with_conn(|conn| refresh_board_histories(conn, &["self:"]))
-        .unwrap_or((0, 0));
+    // 旧自选/概念导入相当于成分变化，提交后整段重算自建板块历史
+    let (board_count, board_rows) = if stock_count > 0 || notion_count > 0 {
+        state
+            .with_conn(|conn| refresh_board_histories(conn, &["self:"]))
+            .unwrap_or((0, 0))
+    } else {
+        (0, 0)
+    };
 
     Ok(json!({
-        "migrated": true,
+        "imported": true,
+        "settings": settings_count,
+        "symbols": symbol_count,
         "stocks": stock_count,
         "notions": notion_count,
         "members": member_count,
+        "boards": board_count,
+        "board_rows": board_rows,
+    }))
+}
+
+// ---------------------------------------------------------------------------
+// 非交易日日历：历史由 histories 日期集合回填，盘中由前端探测结论落库
+// ---------------------------------------------------------------------------
+
+/// 某年某月的天数
+fn days_in_month(year: i32, month: u32) -> u32 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 => {
+            if (year % 4 == 0 && year % 100 != 0) || year % 400 == 0 {
+                29
+            } else {
+                28
+            }
+        }
+        _ => 0,
+    }
+}
+
+/// 日期（YYYY-MM-DD）加一天；用于逐日回填，不引入日期库依赖
+fn next_date(date: &str) -> Option<String> {
+    let mut parts = date.split('-');
+    let year: i32 = parts.next()?.parse().ok()?;
+    let month: u32 = parts.next()?.parse().ok()?;
+    let day: u32 = parts.next()?.parse().ok()?;
+    if !(1..=12).contains(&month) || day == 0 || day > days_in_month(year, month) {
+        return None;
+    }
+    let mut year = year;
+    let mut month = month;
+    let mut day = day + 1;
+    if day > days_in_month(year, month) {
+        day = 1;
+        month += 1;
+    }
+    if month > 12 {
+        month = 1;
+        year += 1;
+    }
+    Some(format!("{year:04}-{month:02}-{day:02}"))
+}
+
+/// 历史非交易日回填：
+/// 1. 区间内 histories 中一只股票都没有的日期（含周末）写入非交易日；
+/// 2. 已写成非交易日但当天现在已有数据的记录自动删除（漏同步补齐后的自愈）。
+/// 返回 (新增数, 删除数)
+fn sync_non_trading_days(
+    conn: &mut dyn SqlSession,
+    start: &str,
+    end: &str,
+) -> Result<(usize, usize), String> {
+    let mut existing = HashSet::new();
+    for row in conn.query("SELECT date FROM non_trading_days", vec![])? {
+        existing.insert(row.get::<_, String>(0).map_err(|e| e.to_string())?);
+    }
+
+    let mut trading = HashSet::new();
+    for row in conn.query(
+        "SELECT DISTINCT date FROM histories WHERE date >= ?1 AND date <= ?2",
+        p![start.to_string(), end.to_string()],
+    )? {
+        trading.insert(row.get::<_, String>(0).map_err(|e| e.to_string())?);
+    }
+
+    let mut add_rows: Vec<String> = Vec::new();
+    let mut remove_rows: Vec<String> = Vec::new();
+    let mut day = start.to_string();
+    loop {
+        if day.as_str() > end {
+            break;
+        }
+        if trading.contains(&day) {
+            // 有数据说明是交易日；此前若误判为休市，这里顺手纠正
+            if existing.contains(&day) {
+                remove_rows.push(day.clone());
+            }
+        } else if !existing.contains(&day) {
+            add_rows.push(day.clone());
+        }
+        match next_date(&day) {
+            Some(next) if next.as_str() > day.as_str() => day = next,
+            _ => break,
+        }
+    }
+
+    let now = now_ms();
+    for date in &add_rows {
+        conn.execute_d(
+            "INSERT OR IGNORE INTO non_trading_days (date, source, confirmed_at) VALUES (?1, 'history', ?2)",
+            "INSERT IGNORE INTO non_trading_days (date, source, confirmed_at) VALUES (?1, 'history', ?2)",
+            p![date.clone(), now],
+        )?;
+    }
+    for date in &remove_rows {
+        conn.execute_d(
+            "DELETE FROM non_trading_days WHERE date = ?1",
+            "DELETE FROM non_trading_days WHERE date = ?1",
+            p![date.clone()],
+        )?;
+    }
+    Ok((add_rows.len(), remove_rows.len()))
+}
+
+/// 历史非交易日回填：区间内 histories 全无数据的日期写入非交易日，已有数据的记录自动删除
+#[tauri::command]
+fn db_sync_non_trading_days(
+    state: State<'_, Db>,
+    start: String,
+    end: String,
+) -> Result<Value, String> {
+    let (added, removed) = state.with_tx(|conn| sync_non_trading_days(conn, &start, &end))?;
+    Ok(json!({ "added": added, "removed": removed }))
+}
+
+/// 盘中探测结论落库：non_trading=true 写入非交易日；false 删除当天误记（自愈）
+#[tauri::command]
+fn db_set_non_trading_day(
+    state: State<'_, Db>,
+    date: String,
+    non_trading: bool,
+    source: String,
+) -> Result<Value, String> {
+    state.with_conn(|conn| {
+        if non_trading {
+            conn.execute_d(
+                "INSERT OR REPLACE INTO non_trading_days (date, source, confirmed_at) VALUES (?1, ?2, ?3)",
+                "INSERT INTO non_trading_days (date, source, confirmed_at) VALUES (?1, ?2, ?3)
+                 ON DUPLICATE KEY UPDATE source = VALUES(source), confirmed_at = VALUES(confirmed_at)",
+                p![date.clone(), source.clone(), now_ms()],
+            )?;
+        } else {
+            conn.execute_d(
+                "DELETE FROM non_trading_days WHERE date = ?1",
+                "DELETE FROM non_trading_days WHERE date = ?1",
+                p![date.clone()],
+            )?;
+        }
+        Ok(())
+    })?;
+    Ok(json!({ "ok": true, "date": date, "non_trading": non_trading }))
+}
+
+// ---------------------------------------------------------------------------
+// 行情来源判定（库优先展示）：9:15–15:15 必须走接口；
+// 其余时段只要库已覆盖「最近一个已收盘交易日」，就直接读库、不发请求
+// ---------------------------------------------------------------------------
+
+/// 行情可纯读库的盘中窗口：9:15–15:15
+const QUOTE_LIVE_START_MINUTES: u32 = 9 * 60 + 15;
+const QUOTE_LIVE_END_MINUTES: u32 = 15 * 60 + 15;
+
+/// 日期（YYYY-MM-DD）减一天
+fn prev_date(date: &str) -> Option<String> {
+    let mut parts = date.split('-');
+    let year: i32 = parts.next()?.parse().ok()?;
+    let month: u32 = parts.next()?.parse().ok()?;
+    let day: u32 = parts.next()?.parse().ok()?;
+    if !(1..=12).contains(&month) || day == 0 || day > days_in_month(year, month) {
+        return None;
+    }
+    let (year, month, day) = if day > 1 {
+        (year, month, day - 1)
+    } else if month > 1 {
+        (year, month - 1, days_in_month(year, month - 1))
+    } else {
+        (year - 1, 12, 31)
+    };
+    Some(format!("{year:04}-{month:02}-{day:02}"))
+}
+
+/// 公历年月日 -> 1970-01-01 起的天数（Howard Hinnant 算法，避免引入日期库）
+fn days_from_civil(year: i32, month: u32, day: u32) -> i64 {
+    let y = year as i64 - if month <= 2 { 1 } else { 0 };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let mp = if month > 2 { month - 3 } else { month + 9 } as i64;
+    let doy = (153 * mp + 2) / 5 + day as i64 - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146097 + doe - 719468
+}
+
+/// 1970-01-01 起的天数 -> 公历年月日
+fn civil_from_days(days: i64) -> (i32, u32, u32) {
+    let z = days + 719468;
+    let era = if z >= 0 { z } else { z - 146096 } / 146097;
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    ((if m <= 2 { y + 1 } else { y }) as i32, m, d)
+}
+
+/// 毫秒时间戳 -> 北京时间的日期与当日分钟数（固定 UTC+8，中国无夏令时）
+fn cst_date_minutes(now_ms: i64) -> (String, u32) {
+    let secs = now_ms / 1000 + 8 * 3600;
+    let days = secs.div_euclid(86400);
+    let minutes = (secs.rem_euclid(86400) / 60) as u32;
+    let (year, month, day) = civil_from_days(days);
+    (format!("{year:04}-{month:02}-{day:02}"), minutes)
+}
+
+/// 日期对应星期几：0=周日 … 6=周六
+fn weekday_index(date: &str) -> Option<i64> {
+    let mut parts = date.split('-');
+    let year: i32 = parts.next()?.parse().ok()?;
+    let month: u32 = parts.next()?.parse().ok()?;
+    let day: u32 = parts.next()?.parse().ok()?;
+    if !(1..=12).contains(&month) || day == 0 || day > days_in_month(year, month) {
+        return None;
+    }
+    // 1970-01-01 是周四，索引 4
+    Some((days_from_civil(year, month, day) + 4).rem_euclid(7))
+}
+
+fn is_weekday_date(date: &str) -> bool {
+    matches!(weekday_index(date), Some(index) if index != 0 && index != 6)
+}
+
+/// 最近一个已收盘的交易日：
+/// 今天本身是交易日且已过 15:15 → 今天；否则往前找最近的工作日（跳过非交易日表）
+fn latest_completed_trading_day(
+    today: &str,
+    today_trading: bool,
+    after_close: bool,
+    non_trading: &HashSet<String>,
+) -> Option<String> {
+    if today_trading && after_close {
+        return Some(today.to_string());
+    }
+    let mut cursor = prev_date(today)?;
+    for _ in 0..400 {
+        if is_weekday_date(&cursor) && !non_trading.contains(&cursor) {
+            return Some(cursor);
+        }
+        cursor = prev_date(&cursor)?;
+    }
+    None
+}
+
+/// 读取 meta 表里的单个键
+fn meta_get(conn: &mut dyn SqlSession, key: &str) -> Result<Option<String>, String> {
+    let rows = conn.query("SELECT value FROM meta WHERE key = ?1", p![key.to_string()])?;
+    Ok(rows.first().and_then(|row| row.get::<_, String>(0).ok()))
+}
+
+/// 写入 meta 表（存在则覆盖）
+fn meta_set(conn: &mut dyn SqlSession, key: &str, value: &str) -> Result<(), String> {
+    conn.execute_d(
+        "INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2)",
+        "INSERT INTO meta (`key`, value) VALUES (?1, ?2) ON DUPLICATE KEY UPDATE value = VALUES(value)",
+        p![key.to_string(), value.to_string()],
+    )?;
+    Ok(())
+}
+
+/// 行情来源判定结果：前端据此决定接口轮询还是读库，以及轮询间隔。
+/// 传入 secids 时额外校验窗口内标的是否都已刷新到最近已收盘交易日：
+/// 全局同步日期只能说明「有标的刷新过」，不能保证当前窗口的标的都在库里。
+fn quote_market_status(
+    conn: &mut dyn SqlSession,
+    now: i64,
+    secids: Option<&[String]>,
+) -> Result<Value, String> {
+    let (today, minutes) = cst_date_minutes(now);
+    let mut non_trading = HashSet::new();
+    for row in conn.query("SELECT date FROM non_trading_days", vec![])? {
+        if let Ok(date) = row.get::<_, String>(0) {
+            non_trading.insert(date);
+        }
+    }
+    let synced = meta_get(conn, "quotes_synced_date")?.filter(|value| !value.trim().is_empty());
+    let today_trading = is_weekday_date(&today) && !non_trading.contains(&today);
+    let live_window = (QUOTE_LIVE_START_MINUTES..=QUOTE_LIVE_END_MINUTES).contains(&minutes);
+    let latest = latest_completed_trading_day(
+        &today,
+        today_trading,
+        minutes > QUOTE_LIVE_END_MINUTES,
+        &non_trading,
+    );
+    // 库内最近一次行情所属交易日 >= 最近已收盘交易日，说明再请求接口也拿不到更新的数据
+    let covered = match (&synced, &latest) {
+        (Some(synced_date), Some(latest_day)) => synced_date.as_str() >= latest_day.as_str(),
+        _ => false,
+    };
+    let base_use_db = !(live_window && today_trading) && covered;
+    // 窗口内标的必须全部刷新到最近交易日才读库，否则先补一次接口（60 秒后重试）
+    let window_covered = match (base_use_db, secids, latest.as_deref()) {
+        (true, Some(list), Some(latest_day)) if !list.is_empty() => {
+            Some(quotes_covered(conn, list, latest_day)?)
+        }
+        _ => None,
+    };
+    let use_db = base_use_db && window_covered.unwrap_or(true);
+    Ok(json!({
+        "today": today,
+        "todayTrading": today_trading,
+        "liveWindow": live_window,
+        "latestTradingDay": latest,
+        "syncedDate": synced,
+        "useDb": use_db,
+        "windowCovered": window_covered,
+    }))
+}
+
+/// 窗口内标的是否都已刷新到最近已收盘交易日：
+/// 以该交易日北京时间 0 点作为门槛，缺行（不在 stocks）或 updated_at 更早都算未覆盖。
+fn quotes_covered(
+    conn: &mut dyn SqlSession,
+    secids: &[String],
+    latest: &str,
+) -> Result<bool, String> {
+    let mut unique: Vec<&str> = secids.iter().map(|secid| secid.as_str()).collect();
+    unique.sort_unstable();
+    unique.dedup();
+    if unique.is_empty() {
+        return Ok(true);
+    }
+
+    let mut parts = latest.split('-');
+    let parsed = (|| {
+        let year: i32 = parts.next()?.parse().ok()?;
+        let month: u32 = parts.next()?.parse().ok()?;
+        let day: u32 = parts.next()?.parse().ok()?;
+        Some((year, month, day))
+    })();
+    let Some((year, month, day)) = parsed else {
+        return Ok(false);
+    };
+    let day_start_ms = (days_from_civil(year, month, day) * 86400 - 8 * 3600) * 1000;
+
+    let mut sql = String::from(
+        "SELECT COUNT(DISTINCT secid) FROM stocks WHERE updated_at >= ?1 AND secid IN (",
+    );
+    let mut params = vec![SqlVal::Int(day_start_ms)];
+    for (index, secid) in unique.iter().enumerate() {
+        if index > 0 {
+            sql.push(',');
+        }
+        sql.push_str(&format!("?{}", index + 2));
+        params.push(SqlVal::Text((*secid).to_string()));
+    }
+    sql.push(')');
+    let found = conn
+        .query_one(&sql, params)?
+        .and_then(|row| row.get::<_, i64>(0).ok())
+        .unwrap_or(0);
+    Ok(found as usize >= unique.len())
+}
+
+/// 行情时段判定：给前端主/子表决定「调接口还是读库」
+#[tauri::command]
+fn db_quote_market_status(
+    state: State<'_, Db>,
+    secids: Option<Vec<String>>,
+) -> Result<Value, String> {
+    state.with_conn(|conn| quote_market_status(conn, now_ms(), secids.as_deref()))
+}
+
+/// 按 secid 批量读取库内行情快照，字段与实时行情对齐（供库优先展示）
+fn load_quotes_rows(conn: &mut dyn SqlSession, secids: &[String]) -> Result<Vec<Value>, String> {
+    if secids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let placeholders = (1..=secids.len())
+        .map(|index| format!("?{index}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let sql = format!(
+        "SELECT secid, name, price, ratio, price_diff, turnover_ratio, high, low, open, pre_close, amount, updated_at \
+         FROM stocks WHERE secid IN ({placeholders})"
+    );
+    let params: Vec<SqlVal> = secids
+        .iter()
+        .map(|secid| SqlVal::Text(secid.clone()))
+        .collect();
+    let rows = conn.query(&sql, params)?;
+    Ok(rows
+        .iter()
+        .map(|row| {
+            let updated_at = row.get::<_, Option<i64>>(11).ok().flatten();
+            json!({
+                "secid": row.get::<_, String>(0).unwrap_or_default(),
+                "name": row.get::<_, String>(1).unwrap_or_default(),
+                "price": row.get::<_, Option<f64>>(2).ok().flatten(),
+                "range": row.get::<_, Option<f64>>(3).ok().flatten(),
+                "price_diff": row.get::<_, Option<f64>>(4).ok().flatten(),
+                "turn": row.get::<_, Option<f64>>(5).ok().flatten(),
+                "high": row.get::<_, Option<f64>>(6).ok().flatten(),
+                "low": row.get::<_, Option<f64>>(7).ok().flatten(),
+                "open": row.get::<_, Option<f64>>(8).ok().flatten(),
+                "pre_close": row.get::<_, Option<f64>>(9).ok().flatten(),
+                "amount": row.get::<_, Option<f64>>(10).ok().flatten(),
+                // 与实时行情一致，时间单位为秒（东财 f124）
+                "time": updated_at.map(|stamp| stamp / 1000),
+            })
+        })
+        .collect())
+}
+
+/// 批量读取库内行情快照
+#[tauri::command]
+fn db_load_quotes(state: State<'_, Db>, secids: Vec<String>) -> Result<Value, String> {
+    let rows = state.with_conn(|conn| load_quotes_rows(conn, &secids))?;
+    Ok(json!(rows))
+}
+
+
+/// 保存前记录当前自选（zx=1）的股票，用于判断本次保存移除了谁
+fn collect_watched_secids(conn: &mut dyn SqlSession) -> Result<HashSet<String>, String> {
+    Ok(conn
+        .query("SELECT secid FROM stocks WHERE zx = 1", vec![])?
+        .iter()
+        .map(|row| row.get::<_, String>(0).map_err(|e| e.to_string()))
+        .collect::<Result<HashSet<String>, String>>()?)
+}
+
+/// 删除本次移出自选、且不再属于任何概念的股票。
+/// 概念/概念成员删除不会走到这里：概念侧删除只动概念数据，股票保留给「数据校验」统一清理。
+fn prune_deleted_watch_stocks(
+    conn: &mut dyn SqlSession,
+    prev_watched: &HashSet<String>,
+) -> Result<usize, String> {
+    let mut removed = 0;
+    for secid in prev_watched {
+        removed += conn.execute(
+            "DELETE FROM stocks
+             WHERE secid = ?1 AND zx = 0 AND name <> ''
+               AND secid NOT IN (SELECT secid FROM notion_stocks)",
+            params![secid],
+        )?;
+    }
+    Ok(removed)
+}
+
+/// 数据校验修复：按 secid 删除已失去全部引用的孤儿股票（zx=0、有名称、不属于任何概念）。
+/// 仍被自选或概念引用的行会被 SQL 条件挡住，不会误删。
+fn delete_orphan_stocks(conn: &mut dyn SqlSession, secids: &[String]) -> Result<usize, String> {
+    let mut removed = 0;
+    for secid in secids {
+        removed += conn.execute(
+            "DELETE FROM stocks
+             WHERE secid = ?1 AND zx = 0 AND name <> ''
+               AND secid NOT IN (SELECT secid FROM notion_stocks)",
+            params![secid],
+        )?;
+    }
+    Ok(removed)
+}
+
+/// 数据校验修复：清理孤儿股票，并连带删除其日K、板块成分与板块日线残留
+#[tauri::command]
+fn db_clean_orphan_stocks(state: State<'_, Db>, secids: String) -> Result<Value, String> {
+    let list: Vec<String> =
+        serde_json::from_str(&secids).map_err(|e| format!("解析待清理股票失败: {e}"))?;
+
+    let removed = state.with_tx(|tx| {
+        let removed = delete_orphan_stocks(tx, &list)?;
+        if removed > 0 {
+            tx.execute(
+                "DELETE FROM histories WHERE secid NOT IN (SELECT secid FROM stocks)",
+                vec![],
+            )?;
+            tx.execute(
+                "DELETE FROM stock_boards WHERE secid NOT IN (SELECT secid FROM stocks)",
+                vec![],
+            )?;
+        }
+        Ok(removed)
+    })?;
+
+    // 官方板块成分变化后整段重算；self 板块由概念树决定，不受孤儿清理影响
+    let (board_count, board_rows) = state
+        .with_conn(|conn| {
+            refresh_board_histories(conn, &["sw1:", "sw2:", "ths_hy:", "ths_gn:"])
+        })
+        .unwrap_or((0, 0));
+
+    Ok(json!({
+        "removed": removed,
         "boards": board_count,
         "board_rows": board_rows,
     }))
@@ -2000,6 +2719,7 @@ fn db_save_watchgroup(state: State<'_, Db>, groups: String) -> Result<Value, Str
         removed_histories,
         removed_links,
     ) = state.with_tx(|tx| {
+        let prev_watched = collect_watched_secids(tx)?;
         tx.execute("DELETE FROM notion_stocks", vec![])?;
         tx.execute("DELETE FROM notions", vec![])?;
         // 自选由当前快照重建，先全部降级再按快照置回
@@ -2009,14 +2729,8 @@ fn db_save_watchgroup(state: State<'_, Db>, groups: String) -> Result<Value, Str
         // 自建概念同步为板块实体，供板块日K 统一聚合
         sync_self_boards(tx)?;
 
-        // 删除不再被自选或任何概念引用的股票，并连带清理其历史K线。
-        // name 为空的行是添加弹窗/搜索时补录的行业缓存（非用户数据），保留不删。
-        let removed_stocks = tx.execute(
-            "DELETE FROM stocks
-             WHERE zx = 0 AND name <> ''
-               AND secid NOT IN (SELECT secid FROM notion_stocks)",
-            vec![],
-        )?;
+        // 只清理本次移出自选的股票；概念侧删除保留股票与日K，交由「数据校验」统一清理孤儿
+        let removed_stocks = prune_deleted_watch_stocks(tx, &prev_watched)?;
         let removed_histories = tx.execute(
             "DELETE FROM histories WHERE secid NOT IN (SELECT secid FROM stocks)",
             vec![],
@@ -2118,16 +2832,27 @@ fn db_load_watchlist(state: State<'_, Db>) -> Result<Value, String> {
     })
 }
 
-/// 行情快照时间（毫秒）。东财 f86 为交易所最后成交时间（秒），缺失时才回退本地当前时间；
-/// 非交易日/停牌时 f86 停留在上一个交易日，db_load_today_candle 才不会误判「今天刷新过行情」。
-fn quote_stamp_ms(quote: &Value, now: i64) -> i64 {
+/// 行情快照时间（毫秒）。东财 f124 为交易所最后成交时间（秒），缺失/非法时返回 0（未知）。
+/// 绝不回退本地当前时间：非交易日（尤其工作日节假日）或停牌股若用本地时间，
+/// db_load_today_candle 会误判「今天刷新过行情」并合成一根假当日K线。
+fn quote_stamp_ms(quote: &Value) -> i64 {
     num_of(quote.get("time"))
         .map(|secs| (secs * 1000.0) as i64)
         .filter(|stamp| *stamp > 0)
-        .unwrap_or(now)
+        .unwrap_or(0)
 }
 
-/// 实时行情批量写入 stocks（每轮刷新一个事务）。
+/// 本轮行情属于哪个交易日：取交易所成交时间的最大值的北京日期（固定 UTC+8）
+fn quotes_synced_date(list: &[Value]) -> Option<String> {
+    let max_stamp = list
+        .iter()
+        .map(quote_stamp_ms)
+        .filter(|stamp| *stamp > 0)
+        .max()?;
+    Some(cst_date_minutes(max_stamp).0)
+}
+
+/// 实时行情批量写入 stocks（每轮刷新一个事务），并记录库级同步交易日。
 /// 停牌/缺值字段沿用库内旧值，避免用 NULL 覆盖上一次的有效行情。
 #[tauri::command]
 fn db_save_quotes(state: State<'_, Db>, quotes: String) -> Result<Value, String> {
@@ -2138,9 +2863,9 @@ fn db_save_quotes(state: State<'_, Db>, quotes: String) -> Result<Value, String>
         return Ok(json!({ "updated": 0 }));
     }
 
-    let updated = state.with_tx(|tx| {
-        let now = now_ms();
+    let (updated, synced_date) = state.with_tx(|tx| {
         let mut updated = 0i64;
+        let previous_synced = meta_get(tx, "quotes_synced_date")?;
 
         for quote in list.iter() {
             let Some(secid) = quote.get("secid").and_then(|v| v.as_str()) else {
@@ -2153,39 +2878,45 @@ fn db_save_quotes(state: State<'_, Db>, quotes: String) -> Result<Value, String>
                 .get("name")
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
-            let stamp = quote_stamp_ms(quote, now);
+            let stamp = quote_stamp_ms(quote);
 
             tx.execute_d(
-                "INSERT INTO stocks (secid, name, open, high, low, price, ratio, amount, turnover_ratio, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                "INSERT INTO stocks (secid, name, open, high, low, pre_close, price_diff, price, ratio, amount, turnover_ratio, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
                  ON CONFLICT(secid) DO UPDATE SET
                      name = CASE WHEN excluded.name = '' THEN stocks.name ELSE excluded.name END,
                      open = COALESCE(excluded.open, stocks.open),
                      high = COALESCE(excluded.high, stocks.high),
                      low = COALESCE(excluded.low, stocks.low),
+                     pre_close = COALESCE(excluded.pre_close, stocks.pre_close),
+                     price_diff = COALESCE(excluded.price_diff, stocks.price_diff),
                      price = COALESCE(excluded.price, stocks.price),
                      ratio = COALESCE(excluded.ratio, stocks.ratio),
                      amount = COALESCE(excluded.amount, stocks.amount),
                      turnover_ratio = COALESCE(excluded.turnover_ratio, stocks.turnover_ratio),
-                     updated_at = excluded.updated_at",
-                "INSERT INTO stocks (secid, name, open, high, low, price, ratio, amount, turnover_ratio, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                     updated_at = CASE WHEN excluded.updated_at > 0 THEN excluded.updated_at ELSE stocks.updated_at END",
+                "INSERT INTO stocks (secid, name, open, high, low, pre_close, price_diff, price, ratio, amount, turnover_ratio, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
                  ON DUPLICATE KEY UPDATE
                      name = CASE WHEN VALUES(name) = '' THEN stocks.name ELSE VALUES(name) END,
                      open = COALESCE(VALUES(open), stocks.open),
                      high = COALESCE(VALUES(high), stocks.high),
                      low = COALESCE(VALUES(low), stocks.low),
+                     pre_close = COALESCE(VALUES(pre_close), stocks.pre_close),
+                     price_diff = COALESCE(VALUES(price_diff), stocks.price_diff),
                      price = COALESCE(VALUES(price), stocks.price),
                      ratio = COALESCE(VALUES(ratio), stocks.ratio),
                      amount = COALESCE(VALUES(amount), stocks.amount),
                      turnover_ratio = COALESCE(VALUES(turnover_ratio), stocks.turnover_ratio),
-                     updated_at = VALUES(updated_at)",
+                     updated_at = IF(VALUES(updated_at) > 0, VALUES(updated_at), stocks.updated_at)",
                 p![
                     secid,
                     name,
                     num_of(quote.get("open")),
                     num_of(quote.get("high")),
                     num_of(quote.get("low")),
+                    num_of(quote.get("pre_close")),
+                    num_of(quote.get("price_diff")),
                     num_of(quote.get("price")),
                     num_of(quote.get("range")),
                     round2(num_of(quote.get("amount"))),
@@ -2195,10 +2926,24 @@ fn db_save_quotes(state: State<'_, Db>, quotes: String) -> Result<Value, String>
             )?;
             updated += 1;
         }
-        Ok(updated)
+
+        // 库级同步交易日只前进不后退：避免盘中开盘前返回旧时间把标记改回去
+        let current = quotes_synced_date(&list);
+        let synced = match (&previous_synced, &current) {
+            (Some(prev), Some(new)) if new.as_str() < prev.as_str() => Some(prev.clone()),
+            (_, Some(new)) => Some(new.clone()),
+            (Some(prev), None) => Some(prev.clone()),
+            (None, None) => None,
+        };
+        if let Some(date) = &synced {
+            if previous_synced.as_deref() != Some(date.as_str()) {
+                meta_set(tx, "quotes_synced_date", date)?;
+            }
+        }
+        Ok((updated, synced))
     })?;
 
-    Ok(json!({ "updated": updated }))
+    Ok(json!({ "updated": updated, "syncedDate": synced_date }))
 }
 
 /// 当天尚未落库时，用 stocks 的 open/high/low/price 合成一根当日K线。
@@ -2250,6 +2995,100 @@ fn db_load_today_candle(
     })
 }
 
+/// 申万一级/二级、同花顺行业字段写回 stocks，并同步 boards/stock_boards 的成分关系。
+/// 只更新库内已存在的股票：搜索预热会带回一批用户没添加的代码，不得凭空在 stocks
+/// 里建空名占位行，也不得为未入库标的写板块成分，否则一次搜索会带进十几只「其它股票」。
+fn save_industries(conn: &mut dyn SqlSession, list: &[Value]) -> Result<i64, String> {
+    let now = now_ms();
+    let mut updated = 0i64;
+
+    for item in list.iter() {
+        let code = item.get("code").and_then(|v| v.as_str()).unwrap_or("");
+        if code.is_empty() {
+            continue;
+        }
+        let l1 = item.get("l1").and_then(|v| v.as_str()).unwrap_or("").trim();
+        let l2 = item.get("l2").and_then(|v| v.as_str()).unwrap_or("").trim();
+        let ths = item.get("ths").and_then(|v| v.as_str()).unwrap_or("").trim();
+
+        // 以库里真实 secid 为准：搜到的 6 位代码可能属于沪市基金/沪B 等，
+        // 不能用首字符猜市场前缀，否则会写出 0.510300 这类错误标的
+        let Some(row) = conn.query_one_d(
+            "SELECT secid FROM stocks
+             WHERE substr(secid, instr(secid, '.') + 1) = ?1 LIMIT 1",
+            "SELECT secid FROM stocks
+             WHERE SUBSTRING(secid, LOCATE('.', secid) + 1) = ?1 LIMIT 1",
+            params![code],
+        )?
+        else {
+            continue;
+        };
+        let secid = row.get::<_, String>(0).map_err(|e| e.to_string())?;
+
+        conn.execute_d(
+            "UPDATE stocks SET industry1 = ?2, industry2 = ?3, ths_industry = ?4,
+                 industry_updated_at = ?5
+             WHERE secid = ?1",
+            "UPDATE stocks SET industry1 = ?2, industry2 = ?3, ths_industry = ?4,
+                 industry_updated_at = ?5
+             WHERE secid = ?1",
+            params![secid, l1, l2, ths, now],
+        )?;
+        updated += 1;
+
+        // 行业变了就换板块：先清掉这只股票旧的申万关系
+        conn.execute(
+            "DELETE FROM stock_boards
+             WHERE secid = ?1 AND (board_key LIKE 'sw1:%' OR board_key LIKE 'sw2:%')",
+            params![secid],
+        )?;
+        if !l1.is_empty() {
+            let key = format!("sw1:{l1}");
+            upsert_board(conn, &key, "sw", "industry", Some(1), None, l1, None)?;
+            link_board(conn, &secid, &key, now)?;
+        }
+        if !l2.is_empty() {
+            let key = format!("sw2:{l2}");
+            let parent = if l1.is_empty() {
+                None
+            } else {
+                Some(format!("sw1:{l1}"))
+            };
+            upsert_board(
+                conn,
+                &key,
+                "sw",
+                "industry",
+                Some(2),
+                None,
+                l2,
+                parent.as_deref(),
+            )?;
+            link_board(conn, &secid, &key, now)?;
+        }
+        // 同花顺行业只存板块名，需要从板块全表换成 board_key（全表还没抓到时先跳过）
+        conn.execute(
+            "DELETE FROM stock_boards WHERE secid = ?1 AND board_key LIKE 'ths_hy:%'",
+            params![secid],
+        )?;
+        if !ths.is_empty() {
+            let key_row = conn.query_one(
+                "SELECT board_key FROM boards
+                 WHERE source = 'ths' AND type = 'industry' AND name = ?1 LIMIT 1",
+                params![ths],
+            )?;
+            let key = match key_row {
+                Some(row) => Some(row.get::<_, String>(0).map_err(|e| e.to_string())?),
+                None => None,
+            };
+            if let Some(key) = key {
+                link_board(conn, &secid, &key, now)?;
+            }
+        }
+    }
+    Ok(updated)
+}
+
 /// 申万一级/二级、同花顺行业字段写回 stocks，并同步 boards/stock_boards 的成分关系
 #[tauri::command]
 fn db_save_industries(state: State<'_, Db>, rows: String) -> Result<Value, String> {
@@ -2260,103 +3099,7 @@ fn db_save_industries(state: State<'_, Db>, rows: String) -> Result<Value, Strin
         return Ok(json!({ "updated": 0 }));
     }
 
-    let updated = state.with_tx(|tx| {
-        let now = now_ms();
-        let mut updated = 0i64;
-
-        for item in list.iter() {
-            let code = item.get("code").and_then(|v| v.as_str()).unwrap_or("");
-            if code.is_empty() {
-                continue;
-            }
-            let l1 = item.get("l1").and_then(|v| v.as_str()).unwrap_or("").trim();
-            let l2 = item.get("l2").and_then(|v| v.as_str()).unwrap_or("").trim();
-            let ths = item.get("ths").and_then(|v| v.as_str()).unwrap_or("").trim();
-            let changed = tx.execute_d(
-                "UPDATE stocks SET industry1 = ?2, industry2 = ?3, ths_industry = ?4,
-                     industry_updated_at = ?5
-                 WHERE substr(secid, instr(secid, '.') + 1) = ?1",
-                "UPDATE stocks SET industry1 = ?2, industry2 = ?3, ths_industry = ?4,
-                     industry_updated_at = ?5
-                 WHERE SUBSTRING(secid, LOCATE('.', secid) + 1) = ?1",
-                params![code, l1, l2, ths, now],
-            )?;
-            if changed == 0 {
-                // 库里还没有这只股票（非自选/非概念成员）时单独补一行，保证 7 天内不再重复抓取
-                let secid = if code.starts_with('6') {
-                    format!("1.{code}")
-                } else {
-                    format!("0.{code}")
-                };
-                tx.execute_d(
-                    "INSERT OR IGNORE INTO stocks
-                         (secid, name, industry1, industry2, ths_industry, industry_updated_at)
-                     VALUES (?1, '', ?2, ?3, ?4, ?5)",
-                    "INSERT IGNORE INTO stocks
-                         (secid, name, industry1, industry2, ths_industry, industry_updated_at)
-                     VALUES (?1, '', ?2, ?3, ?4, ?5)",
-                    params![secid, l1, l2, ths, now],
-                )?;
-            }
-            updated += 1;
-
-            let secid = if code.starts_with('6') {
-                format!("1.{code}")
-            } else {
-                format!("0.{code}")
-            };
-            // 行业变了就换板块：先清掉这只股票旧的申万关系
-            tx.execute(
-                "DELETE FROM stock_boards
-                 WHERE secid = ?1 AND (board_key LIKE 'sw1:%' OR board_key LIKE 'sw2:%')",
-                params![secid],
-            )?;
-            if !l1.is_empty() {
-                let key = format!("sw1:{l1}");
-                upsert_board(tx, &key, "sw", "industry", Some(1), None, l1, None)?;
-                link_board(tx, &secid, &key, now)?;
-            }
-            if !l2.is_empty() {
-                let key = format!("sw2:{l2}");
-                let parent = if l1.is_empty() {
-                    None
-                } else {
-                    Some(format!("sw1:{l1}"))
-                };
-                upsert_board(
-                    tx,
-                    &key,
-                    "sw",
-                    "industry",
-                    Some(2),
-                    None,
-                    l2,
-                    parent.as_deref(),
-                )?;
-                link_board(tx, &secid, &key, now)?;
-            }
-            // 同花顺行业只存板块名，需要从板块全表换成 board_key（全表还没抓到时先跳过）
-            tx.execute(
-                "DELETE FROM stock_boards WHERE secid = ?1 AND board_key LIKE 'ths_hy:%'",
-                params![secid],
-            )?;
-            if !ths.is_empty() {
-                let key_row = tx.query_one(
-                    "SELECT board_key FROM boards
-                     WHERE source = 'ths' AND type = 'industry' AND name = ?1 LIMIT 1",
-                    params![ths],
-                )?;
-                let key = match key_row {
-                    Some(row) => Some(row.get::<_, String>(0).map_err(|e| e.to_string())?),
-                    None => None,
-                };
-                if let Some(key) = key {
-                    link_board(tx, &secid, &key, now)?;
-                }
-            }
-        }
-        Ok(updated)
-    })?;
+    let updated = state.with_tx(|tx| save_industries(tx, &list))?;
 
     // 行业归属变化即板块成分变化：申万一级/二级与同花顺行业的板块历史整段重算
     let (board_count, board_rows) = state
@@ -2674,6 +3417,79 @@ fn db_save_market_width(state: State<'_, Db>, payload: String) -> Result<Value, 
 
 /// 官方概念成分写入 boards/stock_boards（source='ths', type='concept'）。
 /// 入参：[{ code: "600519", concepts: [{ code: "885761", name: "白酒" }] }]
+/// 只处理库内已存在的股票：搜索预热不得为未添加的代码建空名占位行与概念成分。
+fn save_stock_concepts(
+    conn: &mut dyn SqlSession,
+    list: &[Value],
+) -> Result<(i64, i64), String> {
+    let now = now_ms();
+    let mut updated = 0i64;
+    let mut relations = 0i64;
+
+    for item in list.iter() {
+        let code = item.get("code").and_then(|v| v.as_str()).unwrap_or("").trim();
+        if code.is_empty() {
+            continue;
+        }
+        // 以库里真实 secid 为准，未入库的代码直接跳过（不建行、不写板块成分）
+        let Some(row) = conn.query_one_d(
+            "SELECT secid FROM stocks
+             WHERE substr(secid, instr(secid, '.') + 1) = ?1 LIMIT 1",
+            "SELECT secid FROM stocks
+             WHERE SUBSTRING(secid, LOCATE('.', secid) + 1) = ?1 LIMIT 1",
+            params![code],
+        )?
+        else {
+            continue;
+        };
+        let secid = row.get::<_, String>(0).map_err(|e| e.to_string())?;
+
+        // 概念归属会变化：先清掉这只股票旧的官方概念关系
+        conn.execute(
+            "DELETE FROM stock_boards WHERE secid = ?1 AND board_key LIKE 'ths_gn:%'",
+            params![secid],
+        )?;
+
+        let empty: Vec<Value> = Vec::new();
+        let concepts = item
+            .get("concepts")
+            .and_then(|v| v.as_array())
+            .unwrap_or(&empty);
+        for concept in concepts.iter() {
+            let name = concept
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim();
+            if name.is_empty() {
+                continue;
+            }
+            let gn_code = concept
+                .get("code")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim();
+            // 概念代码稳定，优先用代码做键；缺失时退回名称（同花顺概念名全局唯一）
+            let key = if gn_code.is_empty() {
+                format!("ths_gn:{name}")
+            } else {
+                format!("ths_gn:{gn_code}")
+            };
+            let code_value = if gn_code.is_empty() {
+                None
+            } else {
+                Some(gn_code)
+            };
+            upsert_board(conn, &key, "ths", "concept", Some(1), code_value, name, None)?;
+            link_board(conn, &secid, &key, now)?;
+            relations += 1;
+        }
+        updated += 1;
+    }
+    Ok((updated, relations))
+}
+
+/// 官方概念成分写入 boards/stock_boards（source='ths', type='concept'）
 #[tauri::command]
 fn db_save_stock_concepts(state: State<'_, Db>, rows: String) -> Result<Value, String> {
     let payload: Value =
@@ -2683,71 +3499,7 @@ fn db_save_stock_concepts(state: State<'_, Db>, rows: String) -> Result<Value, S
         return Ok(json!({ "updated": 0, "relations": 0 }));
     }
 
-    let now = now_ms();
-    let (updated, relations) = state.with_tx(|tx| {
-        let mut updated = 0i64;
-        let mut relations = 0i64;
-
-        for item in list.iter() {
-            let code = item.get("code").and_then(|v| v.as_str()).unwrap_or("").trim();
-            if code.is_empty() {
-                continue;
-            }
-            let secid = if code.starts_with('6') {
-                format!("1.{code}")
-            } else {
-                format!("0.{code}")
-            };
-            // 非自选/非概念成员的股票也保留一条缓存行
-            tx.execute_d(
-                "INSERT OR IGNORE INTO stocks (secid, name, updated_at) VALUES (?1, '', ?2)",
-                "INSERT IGNORE INTO stocks (secid, name, updated_at) VALUES (?1, '', ?2)",
-                params![secid, now],
-            )?;
-            // 概念归属会变化：先清掉这只股票旧的官方概念关系
-            tx.execute(
-                "DELETE FROM stock_boards WHERE secid = ?1 AND board_key LIKE 'ths_gn:%'",
-                params![secid],
-            )?;
-
-            let empty: Vec<Value> = Vec::new();
-            let concepts = item
-                .get("concepts")
-                .and_then(|v| v.as_array())
-                .unwrap_or(&empty);
-            for concept in concepts.iter() {
-                let name = concept
-                    .get("name")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .trim();
-                if name.is_empty() {
-                    continue;
-                }
-                let gn_code = concept
-                    .get("code")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .trim();
-                // 概念代码稳定，优先用代码做键；缺失时退回名称（同花顺概念名全局唯一）
-                let key = if gn_code.is_empty() {
-                    format!("ths_gn:{name}")
-                } else {
-                    format!("ths_gn:{gn_code}")
-                };
-                let code_value = if gn_code.is_empty() {
-                    None
-                } else {
-                    Some(gn_code)
-                };
-                upsert_board(tx, &key, "ths", "concept", Some(1), code_value, name, None)?;
-                link_board(tx, &secid, &key, now)?;
-                relations += 1;
-            }
-            updated += 1;
-        }
-        Ok((updated, relations))
-    })?;
+    let (updated, relations) = state.with_tx(|tx| save_stock_concepts(tx, &list))?;
 
     // 官方概念归属变化：概念板块历史整段重算
     let (board_count, board_rows) = state
@@ -2780,7 +3532,9 @@ fn day_pct_of(agg: &DayAgg) -> f64 {
 }
 
 /// 按成分股日线聚合板块日线（等权平均涨跌幅 + 成交额求和）。
-/// limit 为 None 取全部历史；否则每只成分股只取最近 limit+1 根（多取一根用于首日分母）。
+/// limit 为 None 取全部历史；否则只取最近 limit 个交易日。
+/// 停牌处理：成分股在某交易日无成交时按 0% 计入分母（成交额计 0），
+/// 复牌首日用停牌前最后一个收盘价作为前收，避免把停牌期间的变动算成单日涨跌。
 fn accumulate_board_days(
     conn: &mut dyn SqlSession,
     board_key: &str,
@@ -2794,18 +3548,36 @@ fn accumulate_board_days(
         .iter()
         .map(|row| row.get::<_, String>(0).map_err(|e| e.to_string()))
         .collect::<Result<Vec<_>, String>>()?;
+    if members.is_empty() {
+        return Ok(BTreeMap::new());
+    }
 
-    // 取一个极大 LIMIT 表示不限制（整段重算）
-    let take = limit.map(|n| n + 1).unwrap_or(i64::MAX);
+    // 交易日轴 = 板块成分股有效收盘日期的并集（停牌日由各股按 0% 补入分母）
+    let take = limit.unwrap_or(i64::MAX);
+    let mut dates: Vec<String> = conn
+        .query(
+            "SELECT DISTINCT date FROM histories
+             WHERE secid IN (SELECT secid FROM stock_boards WHERE board_key = ?1)
+               AND close IS NOT NULL AND close > 0
+             ORDER BY date DESC LIMIT ?2",
+            params![board_key, take],
+        )?
+        .iter()
+        .map(|row| row.get::<_, String>(0).map_err(|e| e.to_string()))
+        .collect::<Result<Vec<_>, String>>()?;
+    dates.reverse();
+    let Some(window_start) = dates.first().cloned() else {
+        return Ok(BTreeMap::new());
+    };
 
     let mut acc: BTreeMap<String, DayAgg> = BTreeMap::new();
     for secid in members.iter() {
         let rows: Vec<(String, f64, Option<f64>)> = conn
             .query(
                 "SELECT date, close, amount FROM histories
-                 WHERE secid = ?1 AND close IS NOT NULL AND close > 0
-                 ORDER BY date DESC LIMIT ?2",
-                params![secid, take],
+                 WHERE secid = ?1 AND close IS NOT NULL AND close > 0 AND date >= ?2
+                 ORDER BY date ASC",
+                params![secid, window_start],
             )?
             .iter()
             .map(|row| {
@@ -2816,20 +3588,48 @@ fn accumulate_board_days(
                 ))
             })
             .collect::<Result<Vec<_>, String>>()?;
-        // 查询按日期倒序，反转后逐日计算 (close / 前一日 close - 1)
-        let mut prev: Option<f64> = None;
-        for (date, close, amount) in rows.into_iter().rev() {
-            if let Some(prev_close) = prev {
-                let entry = acc.entry(date).or_default();
-                entry.sum_pct += close / prev_close - 1.0;
-                entry.count += 1;
-                if let Some(amount) = amount {
-                    entry.sum_amount += amount;
+        let mut by_date: HashMap<String, (f64, Option<f64>)> = HashMap::new();
+        for (date, close, amount) in rows {
+            by_date.insert(date, (close, amount));
+        }
+
+        // 窗口起点之前的最后收盘价：作为窗口首日/停牌期间的前收
+        let carry = conn.query_one(
+            "SELECT close FROM histories
+             WHERE secid = ?1 AND close IS NOT NULL AND close > 0 AND date < ?2
+             ORDER BY date DESC LIMIT 1",
+            params![secid, window_start],
+        )?;
+        let mut prev_close = match carry {
+            Some(row) => Some(row.get::<_, f64>(0).map_err(|e| e.to_string())?),
+            None => None,
+        };
+
+        for date in dates.iter() {
+            match by_date.get(date) {
+                Some((close, amount)) => {
+                    if let Some(prev) = prev_close {
+                        let entry = acc.entry(date.clone()).or_default();
+                        entry.sum_pct += close / prev - 1.0;
+                        entry.count += 1;
+                        if let Some(amount) = amount {
+                            entry.sum_amount += *amount;
+                        }
+                    }
+                    prev_close = Some(*close);
+                }
+                // 停牌/无成交：按 0% 计入分母（未上市时没有前收，不参与）
+                None => {
+                    if prev_close.is_some() {
+                        acc.entry(date.clone()).or_default().count += 1;
+                    }
                 }
             }
-            prev = Some(close);
         }
     }
+
+    // 整天没有任何可参与计算的成分股（板块首个交易日等）不落库
+    acc.retain(|_, agg| agg.count > 0);
     Ok(acc)
 }
 
@@ -3074,11 +3874,23 @@ fn refresh_board_histories(
 
 /// 启动时幂等刷新板块日线（默认最近 5 个交易日）：已有数据的板块增量补齐，
 /// 尚未计算过的板块整段重算；顺带清理已不存在板块的残留。
+/// 聚合算法升级（停牌日按 0% 计入分母）后，首次启动对全部板块整段重算一次。
 #[tauri::command]
 fn db_refresh_board_history(state: State<'_, Db>, days: Option<i64>) -> Result<Value, String> {
     let days = days.unwrap_or(5).clamp(1, 60);
     state.with_conn(|conn| {
         let orphans = clean_orphan_board_histories(conn)?;
+
+        let algo_version = conn
+            .query_one_d(
+                "SELECT value FROM meta WHERE key = 'board_algo_version'",
+                "SELECT value FROM meta WHERE `key` = 'board_algo_version'",
+                vec![],
+            )?
+            .map(|row| row.get::<_, String>(0))
+            .transpose()
+            .map_err(|e| e.to_string())?;
+        let upgrade = algo_version.as_deref() != Some("2");
 
         let list: Vec<(String, i64)> = conn
             .query(
@@ -3101,13 +3913,22 @@ fn db_refresh_board_history(state: State<'_, Db>, days: Option<i64>) -> Result<V
         let mut rebuilt = 0i64;
         let mut rows = 0i64;
         for (key, stored) in list.iter() {
-            if *stored == 0 {
+            if upgrade || *stored == 0 {
                 rows += full_rebuild_board_history(conn, key)?;
                 rebuilt += 1;
             } else {
                 rows += incremental_update_board_history(conn, key, days)?;
                 refreshed += 1;
             }
+        }
+
+        if upgrade {
+            conn.execute_d(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES ('board_algo_version', ?1)",
+                "INSERT INTO meta (`key`, value) VALUES ('board_algo_version', ?1)
+                 ON DUPLICATE KEY UPDATE value = VALUES(value)",
+                params!["2"],
+            )?;
         }
 
         Ok(json!({
@@ -3117,6 +3938,7 @@ fn db_refresh_board_history(state: State<'_, Db>, days: Option<i64>) -> Result<V
             "rebuilt": rebuilt,
             "rows": rows,
             "orphans": orphans,
+            "algoUpgraded": upgrade,
         }))
     })
 }
@@ -3451,43 +4273,112 @@ fn db_replace_history(
     }))
 }
 
-/// 自选股票（zx=1）及其本地日K最新日期，供启动时补齐
+/// 删除指定日期（全部股票）的日K，用于未收盘时清理当天残留
+fn prune_history_date(conn: &mut dyn SqlSession, date: &str) -> Result<usize, String> {
+    conn.execute("DELETE FROM histories WHERE date = ?1", params![date])
+}
+
+/// 区间替换：先删除 [beg, end] 区间内的行，再写入
+fn delete_and_write_history_range(
+    conn: &mut dyn SqlSession,
+    secid: &str,
+    beg: &str,
+    end: &str,
+    list: &[Value],
+) -> Result<(usize, i64), String> {
+    let removed = conn.execute(
+        "DELETE FROM histories WHERE secid = ?1 AND date >= ?2 AND date <= ?3",
+        params![secid, beg, end],
+    )?;
+    let saved = write_candles(conn, secid, list)?;
+    Ok((removed, saved))
+}
+
+/// 未收盘时清理当天残留的K线：15:15 前当天K线必然不完整，删除后由补齐链路重新拉取
+#[tauri::command]
+fn db_prune_today_history(state: State<'_, Db>, date: String) -> Result<Value, String> {
+    if !is_valid_date(&date) {
+        return Err("日期格式应为 yyyy-MM-dd".to_string());
+    }
+    let removed = state.with_conn(|conn| prune_history_date(conn, &date))?;
+    Ok(json!({ "removed": removed }))
+}
+
+/// 区间替换某股票的日K：先删除 [beg, end] 区间内的行，再写入；
+/// 用于全量重拉时清理源端已不存在的日期（避免合并写入残留陈旧行）
+#[tauri::command]
+fn db_replace_history_range(
+    state: State<'_, Db>,
+    secid: String,
+    beg: String,
+    end: String,
+    candles: String,
+) -> Result<Value, String> {
+    if !is_valid_date(&beg) || !is_valid_date(&end) {
+        return Err("日期格式应为 yyyy-MM-dd".to_string());
+    }
+    if secid.is_empty() || beg > end {
+        return Err("区间参数无效".to_string());
+    }
+    let payload: Value =
+        serde_json::from_str(&candles).map_err(|e| format!("解析K线数据失败: {e}"))?;
+    let list = payload.as_array().cloned().unwrap_or_default();
+
+    let (removed, saved) = state.with_tx(|tx| {
+        delete_and_write_history_range(tx, &secid, &beg, &end, &list)
+    })?;
+
+    let (board_count, board_rows) = state
+        .with_conn(|conn| refresh_boards_for_secid(conn, &secid, Some(&beg)))
+        .unwrap_or((0, 0));
+
+    Ok(json!({
+        "removed": removed,
+        "saved": saved,
+        "boards": board_count,
+        "board_rows": board_rows,
+    }))
+}
+
+/// 需要补齐的股票：自选股，或仍属于某个概念且已有历史的股票；孤儿股票不参与每日补齐
+fn list_history_targets(conn: &mut dyn SqlSession) -> Result<Vec<Value>, String> {
+    conn.query_d(
+        "SELECT s.secid,
+                (SELECT MAX(h.date) FROM histories h WHERE h.secid = s.secid),
+                (SELECT COUNT(*) FROM histories h WHERE h.secid = s.secid
+                 AND (h.volume IS NULL OR h.ratio IS NULL OR h.turnover_ratio IS NULL))
+         FROM stocks s
+         WHERE s.zx = 1
+            OR (EXISTS (SELECT 1 FROM histories h2 WHERE h2.secid = s.secid)
+                AND EXISTS (SELECT 1 FROM notion_stocks ns WHERE ns.secid = s.secid))
+         ORDER BY s.rowid",
+        "SELECT s.secid,
+                (SELECT MAX(h.date) FROM histories h WHERE h.secid = s.secid),
+                (SELECT COUNT(*) FROM histories h WHERE h.secid = s.secid
+                 AND (h.volume IS NULL OR h.ratio IS NULL OR h.turnover_ratio IS NULL))
+         FROM stocks s
+         WHERE s.zx = 1
+            OR (EXISTS (SELECT 1 FROM histories h2 WHERE h2.secid = s.secid)
+                AND EXISTS (SELECT 1 FROM notion_stocks ns WHERE ns.secid = s.secid))
+         ORDER BY s.row_id",
+        vec![],
+    )?
+    .iter()
+    .map(|row| {
+        Ok(json!({
+            "secid": row.get::<_, String>(0).map_err(|e| e.to_string())?,
+            "last_date": row.get::<_, Option<String>>(1).map_err(|e| e.to_string())?,
+            "missing_fields": row.get::<_, i64>(2).map_err(|e| e.to_string())?,
+        }))
+    })
+    .collect::<Result<Vec<_>, String>>()
+}
+
+/// 自选股票（zx=1）及其本地日K最新日期、缺字段行数，供启动时补齐
 #[tauri::command]
 fn db_history_targets(state: State<'_, Db>) -> Result<Value, String> {
     state.with_conn(|conn| {
-        let targets: Vec<Value> = conn
-            .query_d(
-                "SELECT s.secid,
-                        (SELECT MAX(h.date) FROM histories h WHERE h.secid = s.secid),
-                        (SELECT h.turnover_ratio FROM histories h
-                         WHERE h.secid = s.secid ORDER BY h.date DESC LIMIT 1),
-                        (SELECT h.volume FROM histories h
-                         WHERE h.secid = s.secid ORDER BY h.date DESC LIMIT 1)
-                 FROM stocks s
-                 WHERE s.zx = 1 OR EXISTS (SELECT 1 FROM histories h2 WHERE h2.secid = s.secid)
-                 ORDER BY s.rowid",
-                "SELECT s.secid,
-                        (SELECT MAX(h.date) FROM histories h WHERE h.secid = s.secid),
-                        (SELECT h.turnover_ratio FROM histories h
-                         WHERE h.secid = s.secid ORDER BY h.date DESC LIMIT 1),
-                        (SELECT h.volume FROM histories h
-                         WHERE h.secid = s.secid ORDER BY h.date DESC LIMIT 1)
-                 FROM stocks s
-                 WHERE s.zx = 1 OR EXISTS (SELECT 1 FROM histories h2 WHERE h2.secid = s.secid)
-                 ORDER BY s.row_id",
-                vec![],
-            )?
-            .iter()
-            .map(|row| {
-                Ok(json!({
-                    "secid": row.get::<_, String>(0).map_err(|e| e.to_string())?,
-                    "last_date": row.get::<_, Option<String>>(1).map_err(|e| e.to_string())?,
-                    "latest_turnover": row.get::<_, Option<f64>>(2).map_err(|e| e.to_string())?,
-                    "latest_volume": row.get::<_, Option<f64>>(3).map_err(|e| e.to_string())?,
-                }))
-            })
-            .collect::<Result<Vec<_>, String>>()?;
-
+        let targets = list_history_targets(conn)?;
         Ok(json!({ "targets": targets }))
     })
 }
@@ -3685,8 +4576,8 @@ fn db_stats(state: State<'_, Db>) -> Result<Value, String> {
         let links = count(conn, "stock_boards")?;
         let migrated = conn
             .query_one_d(
-                "SELECT value FROM meta WHERE key = 'migrated_v1'",
-                "SELECT value FROM meta WHERE `key` = 'migrated_v1'",
+                "SELECT value FROM meta WHERE key = 'legacy_imported'",
+                "SELECT value FROM meta WHERE `key` = 'legacy_imported'",
                 vec![],
             )?
             .is_some();
@@ -3758,8 +4649,17 @@ fn main() {
             db_configure,
             db_sqlite_files,
             db_prepare_sqlite,
-            db_migrate_watchgroup,
+            db_import_legacy,
+            db_sync_non_trading_days,
+            db_set_non_trading_day,
+            db_quote_market_status,
+            db_load_quotes,
+            db_load_settings,
+            db_save_settings,
+            db_load_symbol_configs,
+            db_save_symbol_configs,
             db_save_watchgroup,
+            db_clean_orphan_stocks,
             db_load_watchlist,
             db_save_quotes,
             db_load_today_candle,
@@ -3775,6 +4675,8 @@ fn main() {
             db_load_board_k,
             db_save_history,
             db_replace_history,
+            db_prune_today_history,
+            db_replace_history_range,
             db_history_targets,
             db_load_history,
             db_load_calendar_events,
@@ -3794,6 +4696,13 @@ fn main() {
         .setup(|app| {
             // 每次启动都由前端向导重新选择数据库，这里不再自动打开上次配置
             app.manage(Db::new(None, None));
+
+            // 每 5 分钟广播一次探测信号：主窗口在 9:30–15:15 收到后请求行情判定非交易日
+            let probe_handle = app.handle().clone();
+            std::thread::spawn(move || loop {
+                std::thread::sleep(Duration::from_secs(300));
+                let _ = probe_handle.emit("trading-day-probe", now_ms());
+            });
 
             if let Some(main) = app.get_webview_window("main") {
                 let _ = main.set_always_on_top(true);
@@ -3835,6 +4744,9 @@ fn main() {
 #[cfg(test)]
 mod calendar_tests {
     use super::prune_ended_calendar_events;
+    use super::to_sql_val;
+    use super::SqlSession;
+    use super::Value;
 
     fn conn() -> rusqlite::Connection {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
@@ -3856,14 +4768,284 @@ mod calendar_tests {
     #[test]
     fn 行情时间戳优先使用交易所时间() {
         let quote = serde_json::json!({ "time": 1762300200 });
-        assert_eq!(super::quote_stamp_ms(&quote, 999), 1762300200_000);
+        assert_eq!(super::quote_stamp_ms(&quote), 1762300200_000);
+    }
+
+    /// 回归：f86 缺失时不得回退本地时间。否则非交易日（尤其工作日节假日）或停牌股
+    /// 会在盘中把「今天」误判为已成交，db_load_today_candle 会合成一根假当日K线。
+    #[test]
+    fn 行情时间戳缺失时不回退本地时间() {
+        assert_eq!(super::quote_stamp_ms(&serde_json::json!({})), 0);
+        assert_eq!(super::quote_stamp_ms(&serde_json::json!({ "time": "-" })), 0);
+        assert_eq!(super::quote_stamp_ms(&serde_json::json!({ "time": 0 })), 0);
+    }
+
+    /// 回归：加入自选/概念成分不是行情刷新，不得把 updated_at 写成当前时间，
+    /// 否则非交易日盘中会被 db_load_today_candle 误判为「今天有成交」。
+    #[test]
+    fn 新增标的不会伪造行情刷新时间() {
+        let dir = std::env::temp_dir().join(format!("qushi_upsert_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("data").join("stocks.db");
+        let mut conn = super::init_sqlite(&path).unwrap();
+        let mut session = super::SqliteSession { conn: &mut conn };
+        let symbol = serde_json::json!({ "secid": "1.600519", "name": "贵州茅台" });
+
+        super::upsert_stock(&mut session, &symbol, true).unwrap();
+        let stamp = |session: &mut super::SqliteSession| -> i64 {
+            session
+                .query_one("SELECT updated_at FROM stocks WHERE secid = '1.600519'", vec![])
+                .unwrap()
+                .unwrap()
+                .get::<_, i64>(0)
+                .unwrap()
+        };
+        assert_eq!(stamp(&mut session), 0);
+
+        // 行情刷新写入交易所时间后，重复加入自选不得回退/覆盖该时间
+        session
+            .execute(
+                "UPDATE stocks SET updated_at = 1762300200000 WHERE secid = '1.600519'",
+                vec![],
+            )
+            .unwrap();
+        super::upsert_stock(&mut session, &symbol, true).unwrap();
+        assert_eq!(stamp(&mut session), 1762300200000);
+
+        drop(session);
+        drop(conn);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// 回归：搜索面板会给全部搜索结果预热行业/概念，写入时只能回写库内已存在的股票，
+    /// 不得把其它搜索结果的代码建成 stocks 空名占位行，也不得为未入库标的写板块成分。
+    #[test]
+    fn 行业预热不为未入库股票建占位行() {
+        let dir = std::env::temp_dir().join(format!("qushi_industry_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("data").join("stocks.db");
+        let mut conn = super::init_sqlite(&path).unwrap();
+        let mut session = super::SqliteSession { conn: &mut conn };
+
+        super::upsert_stock(
+            &mut session,
+            &serde_json::json!({ "secid": "1.600519", "name": "贵州茅台" }),
+            true,
+        )
+        .unwrap();
+
+        let rows = vec![
+            serde_json::json!({ "code": "600519", "l1": "食品饮料", "l2": "白酒", "ths": "白酒" }),
+            serde_json::json!({ "code": "300750", "l1": "电力设备", "l2": "电池", "ths": "电池" }),
+        ];
+        let updated = super::save_industries(&mut session, &rows).unwrap();
+        assert_eq!(updated, 1, "只应更新库内已存在的股票");
+
+        let stocks: i64 = session
+            .query_one("SELECT COUNT(*) FROM stocks", vec![])
+            .unwrap()
+            .unwrap()
+            .get(0)
+            .unwrap();
+        assert_eq!(stocks, 1, "不得为搜索结果里的其它股票建占位行");
+
+        let l1: Option<String> = session
+            .query_one(
+                "SELECT industry1 FROM stocks WHERE secid = '1.600519'",
+                vec![],
+            )
+            .unwrap()
+            .unwrap()
+            .get(0)
+            .unwrap();
+        assert_eq!(l1.as_deref(), Some("食品饮料"));
+
+        let links: i64 = session
+            .query_one(
+                "SELECT COUNT(*) FROM stock_boards WHERE secid = '0.300750'",
+                vec![],
+            )
+            .unwrap()
+            .unwrap()
+            .get(0)
+            .unwrap();
+        assert_eq!(links, 0, "未入库标的不得建立板块成分关系");
+
+        drop(session);
+        drop(conn);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// 回归：概念预热同样只为库内已有股票写官方概念成分，不得带进其它搜索结果的股票。
+    #[test]
+    fn 概念预热不为未入库股票建占位行() {
+        let dir = std::env::temp_dir().join(format!("qushi_gn_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("data").join("stocks.db");
+        let mut conn = super::init_sqlite(&path).unwrap();
+        let mut session = super::SqliteSession { conn: &mut conn };
+
+        super::upsert_stock(
+            &mut session,
+            &serde_json::json!({ "secid": "1.600519", "name": "贵州茅台" }),
+            true,
+        )
+        .unwrap();
+
+        let rows = vec![
+            serde_json::json!({
+                "code": "600519",
+                "concepts": [{ "code": "885761", "name": "白酒" }]
+            }),
+            serde_json::json!({
+                "code": "300750",
+                "concepts": [{ "code": "885800", "name": "锂电池" }]
+            }),
+        ];
+        let (updated, relations) = super::save_stock_concepts(&mut session, &rows).unwrap();
+        assert_eq!(updated, 1, "只应处理库内已存在的股票");
+        assert_eq!(relations, 1);
+
+        let stocks: i64 = session
+            .query_one("SELECT COUNT(*) FROM stocks", vec![])
+            .unwrap()
+            .unwrap()
+            .get(0)
+            .unwrap();
+        assert_eq!(stocks, 1, "不得为搜索结果里的其它股票建占位行");
+
+        let linked: i64 = session
+            .query_one(
+                "SELECT COUNT(*) FROM stock_boards WHERE secid = '1.600519' AND board_key LIKE 'ths_gn:%'",
+                vec![],
+            )
+            .unwrap()
+            .unwrap()
+            .get(0)
+            .unwrap();
+        assert_eq!(linked, 1);
+
+        let orphan_links: i64 = session
+            .query_one(
+                "SELECT COUNT(*) FROM stock_boards WHERE secid = '0.300750'",
+                vec![],
+            )
+            .unwrap()
+            .unwrap()
+            .get(0)
+            .unwrap();
+        assert_eq!(orphan_links, 0, "未入库标的不得写入概念成分关系");
+
+        drop(session);
+        drop(conn);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
-    fn 行情时间戳缺失或非法时回退本地时间() {
-        assert_eq!(super::quote_stamp_ms(&serde_json::json!({}), 123), 123);
-        assert_eq!(super::quote_stamp_ms(&serde_json::json!({ "time": "-" }), 123), 123);
-        assert_eq!(super::quote_stamp_ms(&serde_json::json!({ "time": 0 }), 123), 123);
+    fn 旧版数据导入只执行一次且空库才写入() {
+        let dir = std::env::temp_dir().join(format!("qushi_legacy_import_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("stocks.db");
+        let mut conn = super::init_sqlite(&path).unwrap();
+        let payload = serde_json::json!({
+            "settings": { "tableSize": "small" },
+            "symbol_configs": { "1.600519": { "secid": "1.600519", "position": { "num": 10 } } },
+            "groups": [{
+                "id": 0,
+                "name": "自选",
+                "symbols": [{ "secid": "1.600519", "symbol": "600519", "name": "贵州茅台" }]
+            }]
+        });
+
+        let first = {
+            let mut session = super::SqliteSession { conn: &mut conn };
+            super::import_legacy_data(&mut session, &payload)
+                .unwrap()
+                .unwrap()
+        };
+        assert_eq!(first.0, 1, "设置应导入一条");
+        assert_eq!(first.1, 1, "持仓配置应导入一条");
+        assert_eq!(first.2, (1, 0, 0), "自选应导入一只股票");
+
+        {
+            let mut session = super::SqliteSession { conn: &mut conn };
+            // meta.legacy_imported 已写入，重复调用直接跳过
+            assert!(super::import_legacy_data(&mut session, &payload)
+                .unwrap()
+                .is_none());
+            let settings: String = session
+                .query_one(
+                    "SELECT value FROM app_settings WHERE key = 'setting'",
+                    vec![],
+                )
+                .unwrap()
+                .unwrap()
+                .get::<_, String>(0)
+                .unwrap();
+            assert!(settings.contains("small"));
+            let symbols: i64 = session
+                .query_one("SELECT COUNT(*) FROM symbol_configs", vec![])
+                .unwrap()
+                .unwrap()
+                .get::<_, i64>(0)
+                .unwrap();
+            assert_eq!(symbols, 1);
+            let watched: i64 = session
+                .query_one("SELECT COUNT(*) FROM stocks WHERE zx = 1", vec![])
+                .unwrap()
+                .unwrap()
+                .get::<_, i64>(0)
+                .unwrap();
+            assert_eq!(watched, 1);
+        }
+
+        drop(conn);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn 旧版数据导入不覆盖库内已有自选() {
+        let dir = std::env::temp_dir().join(format!("qushi_legacy_watch_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("stocks.db");
+        let mut conn = super::init_sqlite(&path).unwrap();
+        {
+            let mut session = super::SqliteSession { conn: &mut conn };
+            session
+                .execute(
+                    "INSERT INTO stocks (secid, name, zx) VALUES ('1.000001', '平安银行', 1)",
+                    vec![],
+                )
+                .unwrap();
+        }
+        let payload = serde_json::json!({
+            "groups": [{
+                "id": 0,
+                "name": "自选",
+                "symbols": [{ "secid": "1.600519", "symbol": "600519", "name": "贵州茅台" }]
+            }]
+        });
+        {
+            let mut session = super::SqliteSession { conn: &mut conn };
+            let result = super::import_legacy_data(&mut session, &payload)
+                .unwrap()
+                .unwrap();
+            assert_eq!(result.2, (0, 0, 0), "库内已有自选时不再导入旧自选");
+            let secids: Vec<String> = session
+                .query("SELECT secid FROM stocks WHERE zx = 1", vec![])
+                .unwrap()
+                .iter()
+                .map(|row| row.get::<_, String>(0).unwrap())
+                .collect();
+            assert_eq!(secids, vec!["1.000001".to_string()]);
+        }
+        drop(conn);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -3876,7 +5058,7 @@ mod calendar_tests {
     }
 
     #[test]
-    fn sqlite_configure_建库后版本为16() {
+    fn sqlite_configure_建库后版本为19() {
         let dir = std::env::temp_dir().join(format!("qushi_db_test_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -3889,7 +5071,93 @@ mod calendar_tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(version, "16");
+        assert_eq!(version, "19");
+        drop(conn);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn 建库后包含设置与持仓配置表() {
+        let dir = std::env::temp_dir().join(format!("qushi_settings_table_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("stocks.db");
+        let conn = super::init_sqlite(&path).unwrap();
+        for table in ["app_settings", "symbol_configs", "non_trading_days"] {
+            let exists: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                    [table],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(exists, 1, "{table} 应随建库创建");
+        }
+        drop(conn);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn 日期加一天跨月跨年与闰年() {
+        assert_eq!(super::next_date("2024-01-31").unwrap(), "2024-02-01");
+        assert_eq!(super::next_date("2024-02-28").unwrap(), "2024-02-29");
+        assert_eq!(super::next_date("2023-02-28").unwrap(), "2023-03-01");
+        assert_eq!(super::next_date("2024-12-31").unwrap(), "2025-01-01");
+        assert!(super::next_date("2024-13-01").is_none());
+        assert!(super::next_date("2024-02-30").is_none());
+    }
+
+    #[test]
+    fn 非交易日回填按histories日期集合写入并自愈() {
+        let dir = std::env::temp_dir().join(format!("qushi_ntd_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("stocks.db");
+        let mut conn = super::init_sqlite(&path).unwrap();
+        {
+            let mut session = super::SqliteSession { conn: &mut conn };
+            for date in ["2024-01-02", "2024-01-03", "2024-01-04", "2024-01-05"] {
+                session
+                    .execute(
+                        "INSERT INTO histories (secid, date, close) VALUES (?1, ?2, 10)",
+                        p!["1.600519".to_string(), date.to_string()],
+                    )
+                    .unwrap();
+            }
+        }
+        {
+            let mut session = super::SqliteSession { conn: &mut conn };
+            let (added, removed) =
+                super::sync_non_trading_days(&mut session, "2024-01-01", "2024-01-07").unwrap();
+            assert_eq!((added, removed), (3, 0), "元旦与周末三天应为非交易日");
+            let dates: Vec<String> = session
+                .query("SELECT date FROM non_trading_days ORDER BY date", vec![])
+                .unwrap()
+                .iter()
+                .map(|row| row.get::<_, String>(0).unwrap())
+                .collect();
+            assert_eq!(dates, vec!["2024-01-01", "2024-01-06", "2024-01-07"]);
+        }
+        // 补同步后该日已有数据：应自动删除此前误判的非交易日
+        {
+            let mut session = super::SqliteSession { conn: &mut conn };
+            session
+                .execute(
+                    "INSERT INTO histories (secid, date, close) VALUES (?1, ?2, 10)",
+                    p!["1.600519".to_string(), "2024-01-06".to_string()],
+                )
+                .unwrap();
+            let (added, removed) =
+                super::sync_non_trading_days(&mut session, "2024-01-01", "2024-01-07").unwrap();
+            assert_eq!((added, removed), (0, 1));
+            let dates: Vec<String> = session
+                .query("SELECT date FROM non_trading_days ORDER BY date", vec![])
+                .unwrap()
+                .iter()
+                .map(|row| row.get::<_, String>(0).unwrap())
+                .collect();
+            assert_eq!(dates, vec!["2024-01-01", "2024-01-07"]);
+        }
         drop(conn);
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -3935,7 +5203,7 @@ mod calendar_tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(version, "16");
+        assert_eq!(version, "19");
         drop(conn);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -3988,5 +5256,576 @@ mod calendar_tests {
             .collect::<rusqlite::Result<Vec<_>>>()
             .unwrap();
         assert_eq!(names, vec!["今天结束", "明天结束", "每月重复", "每年重复"]);
+    }
+
+    /// 仅含 histories / stock_boards 的内存库，用于板块聚合与K线清理用例
+    fn histories_conn() -> rusqlite::Connection {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE histories (
+                secid TEXT NOT NULL, date TEXT NOT NULL, open REAL, close REAL, high REAL, low REAL,
+                volume REAL, amount REAL, ratio REAL, turnover_ratio REAL,
+                PRIMARY KEY (secid, date)
+             ) WITHOUT ROWID;
+             CREATE TABLE stock_boards (
+                secid TEXT NOT NULL, board_key TEXT NOT NULL, updated_at INTEGER,
+                PRIMARY KEY (secid, board_key)
+             ) WITHOUT ROWID;",
+        )
+        .unwrap();
+        conn
+    }
+
+    /// A 正常交易；B 在 01-07 停牌、01-08 复牌；C 01-07 才上市
+    fn seed_suspended_board(conn: &rusqlite::Connection) {
+        conn.execute_batch(
+            "INSERT INTO stock_boards (secid, board_key) VALUES
+                ('1.000001','test:b'), ('0.000002','test:b'), ('0.000003','test:b');
+             INSERT INTO histories (secid, date, close, amount) VALUES
+                ('1.000001','2026-01-05',9.9,100),
+                ('1.000001','2026-01-06',10.0,110),
+                ('1.000001','2026-01-07',10.5,120),
+                ('1.000001','2026-01-08',10.5,130),
+                ('0.000002','2026-01-05',20.0,50),
+                ('0.000002','2026-01-06',20.0,55),
+                ('0.000002','2026-01-08',22.0,60),
+                ('0.000003','2026-01-07',5.0,10),
+                ('0.000003','2026-01-08',5.05,20);",
+        )
+        .unwrap();
+    }
+
+    /// 回归：停牌日不能剔除分母。01-07 B 停牌应按 0% 计入，
+    /// 否则板块涨跌幅会只剩 A 的 +5%（真实等权应为 +2.5%）。
+    #[test]
+    fn 板块聚合把停牌日按零涨跌计入分母() {
+        let mut conn = histories_conn();
+        seed_suspended_board(&conn);
+        let mut session = super::SqliteSession { conn: &mut conn };
+        let acc = super::accumulate_board_days(&mut session, "test:b", None).unwrap();
+
+        let dates: Vec<&str> = acc.keys().map(|key| key.as_str()).collect();
+        assert_eq!(dates, vec!["2026-01-06", "2026-01-07", "2026-01-08"]);
+
+        // 01-06：A +1.01%，B 0%
+        let day = &acc["2026-01-06"];
+        assert_eq!(day.count, 2);
+        assert!((super::day_pct_of(day) - (10.0 / 9.9 - 1.0) / 2.0).abs() < 1e-12);
+
+        // 01-07：A +5%，B 停牌按 0%；C 当日上市无前收不参与
+        let day = &acc["2026-01-07"];
+        assert_eq!(day.count, 2);
+        assert!((super::day_pct_of(day) - 0.025).abs() < 1e-12);
+        assert!((day.sum_amount - 120.0).abs() < 1e-12);
+
+        // 01-08：A 0%，B 复牌 +10%，C +1%
+        let day = &acc["2026-01-08"];
+        assert_eq!(day.count, 3);
+        assert!((super::day_pct_of(day) - (0.0 + 0.1 + 0.01) / 3.0).abs() < 1e-12);
+    }
+
+    /// 回归：增量窗口的首日也必须用窗口前最后一个收盘价作为前收，
+    /// 否则窗口首日会因缺少前收而少算一只成分股。
+    #[test]
+    fn 板块增量窗口用窗口前收盘作为前收() {
+        let mut conn = histories_conn();
+        seed_suspended_board(&conn);
+        let mut session = super::SqliteSession { conn: &mut conn };
+        let acc = super::accumulate_board_days(&mut session, "test:b", Some(2)).unwrap();
+
+        let dates: Vec<&str> = acc.keys().map(|key| key.as_str()).collect();
+        assert_eq!(dates, vec!["2026-01-07", "2026-01-08"]);
+        assert_eq!(acc["2026-01-07"].count, 2);
+        assert!((super::day_pct_of(&acc["2026-01-07"]) - 0.025).abs() < 1e-12);
+        assert_eq!(acc["2026-01-08"].count, 3);
+    }
+
+    /// 回归：区间替换写入前先清空区间，源端已不存在的日期不能留在库里
+    #[test]
+    fn 区间替换清理源端已不存在的日期() {
+        let mut conn = histories_conn();
+        conn.execute_batch(
+            "INSERT INTO histories (secid, date, close) VALUES
+                ('1.600519','2026-01-05',10),
+                ('1.600519','2026-01-06',11),
+                ('1.600519','2026-01-07',12);",
+        )
+        .unwrap();
+        let list = vec![serde_json::json!({
+            "date": "2026-01-07", "open": 12, "close": 12, "high": 12, "low": 12,
+            "volume": 1000, "amount": 120000000.0, "ratio": 0.0, "turnover_ratio": 0.5
+        })];
+        let mut session = super::SqliteSession { conn: &mut conn };
+        let (removed, saved) = super::delete_and_write_history_range(
+            &mut session,
+            "1.600519",
+            "2026-01-06",
+            "2026-01-07",
+            &list,
+        )
+        .unwrap();
+
+        assert_eq!(removed, 2);
+        assert_eq!(saved, 1);
+        let dates: Vec<String> = session
+            .query(
+                "SELECT date FROM histories WHERE secid = '1.600519' ORDER BY date",
+                vec![],
+            )
+            .unwrap()
+            .iter()
+            .map(|row| row.get::<_, String>(0).unwrap())
+            .collect();
+        assert_eq!(dates, vec!["2026-01-05", "2026-01-07"]);
+    }
+
+    /// 回归：15:15 前启动时只清理当天残留K线，不影响更早历史
+    #[test]
+    fn 未收盘清理只删除当天k线() {
+        let mut conn = histories_conn();
+        conn.execute_batch(
+            "INSERT INTO histories (secid, date, close) VALUES
+                ('1.600519','2026-01-07',10),
+                ('1.600519','2026-01-08',11),
+                ('0.000001','2026-01-08',12);",
+        )
+        .unwrap();
+        let mut session = super::SqliteSession { conn: &mut conn };
+        let removed = super::prune_history_date(&mut session, "2026-01-08").unwrap();
+
+        assert_eq!(removed, 2);
+        let left: i64 = session
+            .query_one("SELECT COUNT(*) FROM histories", vec![])
+            .unwrap()
+            .unwrap()
+            .get::<_, i64>(0)
+            .unwrap();
+        assert_eq!(left, 1);
+    }
+
+    /// 回归：字段回填不能只看最新一行，中间任何一行缺字段都需要整段重拉；
+    /// 孤儿股票（不属于任何概念）即使有历史也不再纳入每日补齐
+    #[test]
+    fn 历史目标统计任意缺失字段行() {
+        let mut conn = histories_conn();
+        conn.execute_batch(
+            "CREATE TABLE stocks (
+                secid TEXT PRIMARY KEY, name TEXT NOT NULL, price REAL, open REAL, high REAL,
+                low REAL, ratio REAL, amount REAL, turnover_ratio REAL, industry1 TEXT,
+                industry2 TEXT, ths_industry TEXT, industry_updated_at INTEGER,
+                zx INTEGER NOT NULL DEFAULT 0, updated_at INTEGER
+             );
+             CREATE TABLE notion_stocks (notion_id INTEGER NOT NULL, secid TEXT NOT NULL);
+             INSERT INTO stocks (secid, name, zx) VALUES
+                ('1.600519','贵州茅台',1),
+                ('0.000001','平安银行',0),
+                ('0.000002','孤儿股票',0);
+             INSERT INTO notion_stocks (notion_id, secid) VALUES (1,'0.000001');
+             INSERT INTO histories (secid, date, close, volume, ratio, turnover_ratio) VALUES
+                ('1.600519','2026-01-05',10,1000,0.0,0.5),
+                ('1.600519','2026-01-06',11,NULL,NULL,NULL),
+                ('1.600519','2026-01-07',12,1000,1.0,0.5),
+                ('0.000001','2024-06-01',8,NULL,0.0,0.5),
+                ('0.000002','2024-06-01',9,1000,0.0,0.5);",
+        )
+        .unwrap();
+        let mut session = super::SqliteSession { conn: &mut conn };
+        let targets = super::list_history_targets(&mut session).unwrap();
+
+        assert_eq!(targets.len(), 2);
+        assert_eq!(targets[0]["secid"], "1.600519");
+        assert_eq!(targets[0]["last_date"], "2026-01-07");
+        // 最新一行完整，但 01-06 缺字段 → 仍统计为待回填
+        assert_eq!(targets[0]["missing_fields"].as_i64(), Some(1));
+        // 非自选但仍是概念成员且有历史，同样纳入补齐目标
+        assert_eq!(targets[1]["secid"], "0.000001");
+        assert_eq!(targets[1]["missing_fields"].as_i64(), Some(1));
+    }
+
+    /// 仅含 stocks / notion_stocks 的最小库，用于股票清理用例
+    fn watch_conn() -> rusqlite::Connection {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE stocks (
+                secid TEXT PRIMARY KEY, name TEXT NOT NULL, zx INTEGER NOT NULL DEFAULT 0
+             );
+             CREATE TABLE notion_stocks (notion_id INTEGER NOT NULL, secid TEXT NOT NULL);",
+        )
+        .unwrap();
+        conn
+    }
+
+    /// 回归：保存自选时只清理「本次移出自选且不属于任何概念」的股票；
+    /// 概念删除遗留的孤儿股票保留，等「数据校验」统一清理。
+    #[test]
+    fn 保存只清理移出自选的股票() {
+        let mut conn = watch_conn();
+        conn.execute_batch(
+            "INSERT INTO stocks (secid, name, zx) VALUES
+                ('1.600519','贵州茅台',0),
+                ('0.000001','平安银行',0),
+                ('0.000003','已删概念成员',0),
+                ('0.000858','五粮液',1),
+                ('0.000002','',0);
+             INSERT INTO notion_stocks (notion_id, secid) VALUES (3,'1.600519');",
+        )
+        .unwrap();
+        let mut session = super::SqliteSession { conn: &mut conn };
+        let prev: std::collections::HashSet<String> = ["1.600519", "0.000001", "0.000858"]
+            .iter()
+            .map(|secid| secid.to_string())
+            .collect();
+        let removed = super::prune_deleted_watch_stocks(&mut session, &prev).unwrap();
+
+        assert_eq!(removed, 1); // 仅平安银行：移出自选且无任何概念引用
+        let left: Vec<String> = session
+            .query("SELECT secid FROM stocks", vec![])
+            .unwrap()
+            .iter()
+            .map(|row| row.get::<_, String>(0).unwrap())
+            .collect();
+        assert!(left.contains(&"1.600519".to_string())); // 移出自选但仍在概念中
+        assert!(left.contains(&"0.000858".to_string())); // 仍在自选
+        assert!(left.contains(&"0.000002".to_string())); // 行业缓存（name 为空）
+        assert!(left.contains(&"0.000003".to_string())); // 概念删除遗留的孤儿
+        assert!(!left.contains(&"0.000001".to_string()));
+    }
+
+    /// 回归：数据校验修复删除孤儿股票，仍被自选/概念引用或只有缓存的行不受影响。
+    #[test]
+    fn 校验修复删除孤儿股票() {
+        let mut conn = watch_conn();
+        conn.execute_batch(
+            "INSERT INTO stocks (secid, name, zx) VALUES
+                ('1.600519','贵州茅台',0),
+                ('0.000001','平安银行',0),
+                ('0.000002','',0),
+                ('0.000858','五粮液',1);
+             INSERT INTO notion_stocks (notion_id, secid) VALUES (3,'1.600519');",
+        )
+        .unwrap();
+        let mut session = super::SqliteSession { conn: &mut conn };
+        let secids = vec![
+            "1.600519".to_string(),
+            "0.000001".to_string(),
+            "0.000002".to_string(),
+            "0.000858".to_string(),
+        ];
+        let removed = super::delete_orphan_stocks(&mut session, &secids).unwrap();
+
+        assert_eq!(removed, 1); // 只有平安银行是孤儿
+        let left: Vec<String> = session
+            .query("SELECT secid FROM stocks", vec![])
+            .unwrap()
+            .iter()
+            .map(|row| row.get::<_, String>(0).unwrap())
+            .collect();
+        assert!(left.contains(&"1.600519".to_string()));
+        assert!(left.contains(&"0.000858".to_string()));
+        assert!(left.contains(&"0.000002".to_string()));
+        assert!(!left.contains(&"0.000001".to_string()));
+    }
+
+    /// 仅含 meta / non_trading_days / stocks 的内存库，用于行情来源判定与快照读取
+    fn quotes_conn() -> rusqlite::Connection {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+             CREATE TABLE non_trading_days (
+                date TEXT PRIMARY KEY, source TEXT NOT NULL, confirmed_at INTEGER NOT NULL DEFAULT 0
+             );
+             CREATE TABLE stocks (
+                secid TEXT PRIMARY KEY, name TEXT NOT NULL, price REAL, open REAL, high REAL, low REAL,
+                pre_close REAL, price_diff REAL, ratio REAL, amount REAL, turnover_ratio REAL,
+                industry1 TEXT, industry2 TEXT, ths_industry TEXT, industry_updated_at INTEGER,
+                zx INTEGER NOT NULL DEFAULT 0, updated_at INTEGER
+             );",
+        )
+        .unwrap();
+        conn
+    }
+
+    /// 构造北京时间（UTC+8）的毫秒时间戳
+    fn cst_ms(year: i32, month: u32, day: u32, minutes: u32) -> i64 {
+        (super::days_from_civil(year, month, day) * 86400 + minutes as i64 * 60 - 8 * 3600) * 1000
+    }
+
+    #[test]
+    fn 日期减一天跨月跨年与闰年() {
+        assert_eq!(super::prev_date("2024-01-01").unwrap(), "2023-12-31");
+        assert_eq!(super::prev_date("2024-03-01").unwrap(), "2024-02-29");
+        assert_eq!(super::prev_date("2023-03-01").unwrap(), "2023-02-28");
+        assert!(super::prev_date("2024-13-01").is_none());
+        assert!(super::prev_date("2024-02-30").is_none());
+    }
+
+    #[test]
+    fn 北京时间日期与分钟固定按utc加8换算() {
+        let morning = cst_ms(2026, 11, 9, 10 * 60);
+        assert_eq!(
+            super::cst_date_minutes(morning),
+            ("2026-11-09".to_string(), 600)
+        );
+        // UTC 20:00 = 北京次日 04:00
+        let late = (super::days_from_civil(2026, 11, 9) * 86400 + 20 * 3600) * 1000;
+        assert_eq!(
+            super::cst_date_minutes(late),
+            ("2026-11-10".to_string(), 240)
+        );
+        // 2026-11-08 是周日
+        assert_eq!(super::weekday_index("2026-11-08"), Some(0));
+        assert!(super::is_weekday_date("2026-11-09"));
+        assert!(!super::is_weekday_date("2026-11-08"));
+    }
+
+    #[test]
+    fn 最近已收盘交易日跳过周末与非交易日() {
+        let non: std::collections::HashSet<String> = ["2026-10-01", "2026-10-02", "2026-10-05"]
+            .iter()
+            .map(|date| date.to_string())
+            .collect();
+        // 周一开盘前 → 上周五
+        assert_eq!(
+            super::latest_completed_trading_day("2026-11-09", true, false, &non).as_deref(),
+            Some("2026-11-06")
+        );
+        // 周一收盘后 → 今天
+        assert_eq!(
+            super::latest_completed_trading_day("2026-11-09", true, true, &non).as_deref(),
+            Some("2026-11-09")
+        );
+        // 周日 → 上周五
+        assert_eq!(
+            super::latest_completed_trading_day("2026-11-08", false, true, &non).as_deref(),
+            Some("2026-11-06")
+        );
+        // 工作日节假日（10-05 周一休市）→ 09-30
+        assert_eq!(
+            super::latest_completed_trading_day("2026-10-05", true, false, &non).as_deref(),
+            Some("2026-09-30")
+        );
+    }
+
+    fn status_json(now_ms: i64, synced: Option<&str>, non_days: &[&str]) -> Value {
+        let mut conn = quotes_conn();
+        if let Some(date) = synced {
+            conn.execute(
+                "INSERT INTO meta (key, value) VALUES ('quotes_synced_date', ?1)",
+                [date],
+            )
+            .unwrap();
+        }
+        for date in non_days {
+            conn.execute(
+                "INSERT INTO non_trading_days (date, source) VALUES (?1, 'history')",
+                [date],
+            )
+            .unwrap();
+        }
+        let mut session = super::SqliteSession { conn: &mut conn };
+        super::quote_market_status(&mut session, now_ms, None).unwrap()
+    }
+
+    #[test]
+    fn 行情来源判定盘中走接口其余时段按库是否覆盖交易日() {
+        // 周一盘中：即使库已是上周五也必须走接口
+        let live = status_json(cst_ms(2026, 11, 9, 10 * 60), Some("2026-11-06"), &[]);
+        assert_eq!(live["todayTrading"], true);
+        assert_eq!(live["liveWindow"], true);
+        assert_eq!(live["latestTradingDay"], "2026-11-06");
+        assert_eq!(live["useDb"], false);
+
+        // 周一开盘前：库是上周五 → 直接读库
+        let before = status_json(cst_ms(2026, 11, 9, 8 * 60), Some("2026-11-06"), &[]);
+        assert_eq!(before["liveWindow"], false);
+        assert_eq!(before["useDb"], true);
+
+        // 库落后（只有上周四）→ 需要补接口
+        let behind = status_json(cst_ms(2026, 11, 9, 8 * 60), Some("2026-11-05"), &[]);
+        assert_eq!(behind["useDb"], false);
+
+        // 周一收盘后：库是上周五 → 落后；库已是周一 → 读库
+        let after = status_json(cst_ms(2026, 11, 9, 16 * 60), Some("2026-11-06"), &[]);
+        assert_eq!(after["latestTradingDay"], "2026-11-09");
+        assert_eq!(after["useDb"], false);
+        let after_fresh = status_json(cst_ms(2026, 11, 9, 16 * 60), Some("2026-11-09"), &[]);
+        assert_eq!(after_fresh["useDb"], true);
+
+        // 工作日节假日：盘中也不请求接口
+        let holiday = status_json(
+            cst_ms(2026, 11, 9, 10 * 60),
+            Some("2026-11-06"),
+            &["2026-11-09"],
+        );
+        assert_eq!(holiday["todayTrading"], false);
+        assert_eq!(holiday["latestTradingDay"], "2026-11-06");
+        assert_eq!(holiday["useDb"], true);
+    }
+
+    #[test]
+    fn 窗口内标的全部刷新到最近交易日后才读库() {
+        // 周一开盘前，最近已收盘交易日 = 上周五
+        let now = cst_ms(2026, 11, 9, 8 * 60);
+        let friday = cst_ms(2026, 11, 6, 10 * 60);
+        let thursday = cst_ms(2026, 11, 5, 10 * 60);
+        let mut conn = quotes_conn();
+        conn.execute(
+            "INSERT INTO meta (key, value) VALUES ('quotes_synced_date', '2026-11-06')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO stocks (secid, name, updated_at) VALUES ('1.600519','贵州茅台',?1)",
+            [friday],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO stocks (secid, name, updated_at) VALUES ('0.000858','五粮液',?1)",
+            [thursday],
+        )
+        .unwrap();
+
+        let mut session = super::SqliteSession { conn: &mut conn };
+        let both = ["1.600519".to_string(), "0.000858".to_string()];
+        // 五粮液还停在周四 → 当前窗口不能直接读库
+        let status = super::quote_market_status(&mut session, now, Some(&both)).unwrap();
+        assert_eq!(status["useDb"], false);
+        assert_eq!(status["windowCovered"], false);
+
+        // 补一次接口后两只都刷新到周五 → 读库
+        session
+            .execute("UPDATE stocks SET updated_at = ?1", p![friday])
+            .unwrap();
+        let status = super::quote_market_status(&mut session, now, Some(&both)).unwrap();
+        assert_eq!(status["useDb"], true);
+        assert_eq!(status["windowCovered"], true);
+
+        // 窗口里有库里没有的标的（新加自选）→ 未覆盖
+        let with_new = [
+            "1.600519".to_string(),
+            "0.000858".to_string(),
+            "9.999999".to_string(),
+        ];
+        let status = super::quote_market_status(&mut session, now, Some(&with_new)).unwrap();
+        assert_eq!(status["useDb"], false);
+
+        // 不传窗口标的时保持全局判定
+        let global = super::quote_market_status(&mut session, now, None).unwrap();
+        assert_eq!(global["useDb"], true);
+        assert_eq!(global["windowCovered"], Value::Null);
+    }
+
+    #[test]
+    fn 批量读取行情快照字段与实时行情对齐() {
+        let mut conn = quotes_conn();
+        conn.execute(
+            "INSERT INTO stocks (secid, name, price, ratio, price_diff, turnover_ratio, high, low, open, pre_close, amount, updated_at)
+             VALUES ('1.600519','贵州茅台',1500,1.5,22.18,0.6,1510,1490,1495,1480,12.3,1762316400000)",
+            [],
+        )
+        .unwrap();
+        let mut session = super::SqliteSession { conn: &mut conn };
+        let rows = super::load_quotes_rows(&mut session, &["1.600519".to_string()]).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["secid"], "1.600519");
+        assert_eq!(rows[0]["price"], 1500.0);
+        assert_eq!(rows[0]["range"], 1.5);
+        assert_eq!(rows[0]["price_diff"], 22.18);
+        assert_eq!(rows[0]["turn"], 0.6);
+        assert_eq!(rows[0]["pre_close"], 1480.0);
+        // 库里 updated_at 是毫秒，输出与东财 f124 一致按秒
+        assert_eq!(rows[0]["time"], 1762316400);
+
+        // 库内没有的 secid 不返回，前端保持占位
+        let rows = super::load_quotes_rows(
+            &mut session,
+            &["1.600519".to_string(), "9.999999".to_string()],
+        )
+        .unwrap();
+        assert_eq!(rows.len(), 1);
+    }
+
+    #[test]
+    fn 行情同步日期取本轮最大交易所时间() {
+        let early = cst_ms(2026, 11, 5, 10 * 60) / 1000;
+        let late = cst_ms(2026, 11, 6, 14 * 60) / 1000;
+        let list = vec![
+            serde_json::json!({ "time": early }),
+            serde_json::json!({ "time": late }),
+            serde_json::json!({ "time": 0 }),
+        ];
+        assert_eq!(
+            super::quotes_synced_date(&list).as_deref(),
+            Some("2026-11-06")
+        );
+        assert_eq!(super::quotes_synced_date(&[serde_json::json!({})]), None);
+    }
+
+    #[test]
+    fn 旧库升级补列后可存取昨收涨跌额() {
+        let dir = std::env::temp_dir().join(format!("qushi_quote_migrate_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("data").join("stocks.db");
+        {
+            let conn = super::init_sqlite(&path).unwrap();
+            // 模拟 v18：去掉 v19 新增的两列后重新初始化，验证幂等补列
+            conn.execute_batch(
+                "ALTER TABLE stocks DROP COLUMN pre_close;
+                 ALTER TABLE stocks DROP COLUMN price_diff;",
+            )
+            .unwrap();
+        }
+        let mut conn = super::init_sqlite(&path).unwrap();
+        let mut session = super::SqliteSession { conn: &mut conn };
+        session
+            .execute(
+                "INSERT INTO stocks (secid, name, pre_close, price_diff)
+                 VALUES ('1.600519','贵州茅台',1478,22)",
+                vec![],
+            )
+            .unwrap();
+        let row = session
+            .query_one(
+                "SELECT pre_close, price_diff FROM stocks WHERE secid = '1.600519'",
+                vec![],
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.get::<_, f64>(0).unwrap(), 1478.0);
+        assert_eq!(row.get::<_, f64>(1).unwrap(), 22.0);
+
+        let version = session
+            .query_one("SELECT value FROM meta WHERE key = 'schema_version'", vec![])
+            .unwrap()
+            .unwrap()
+            .get::<_, String>(0)
+            .unwrap();
+        assert_eq!(version, "19");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn meta读写可覆盖更新() {
+        let mut conn = quotes_conn();
+        let mut session = super::SqliteSession { conn: &mut conn };
+        assert_eq!(
+            super::meta_get(&mut session, "quotes_synced_date").unwrap(),
+            None
+        );
+        super::meta_set(&mut session, "quotes_synced_date", "2026-11-06").unwrap();
+        assert_eq!(
+            super::meta_get(&mut session, "quotes_synced_date")
+                .unwrap()
+                .as_deref(),
+            Some("2026-11-06")
+        );
+        super::meta_set(&mut session, "quotes_synced_date", "2026-11-09").unwrap();
+        assert_eq!(
+            super::meta_get(&mut session, "quotes_synced_date")
+                .unwrap()
+                .as_deref(),
+            Some("2026-11-09")
+        );
     }
 }

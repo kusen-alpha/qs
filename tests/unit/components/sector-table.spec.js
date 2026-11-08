@@ -7,19 +7,50 @@ import { useMonitorStore } from '@/stores/monitor';
 import { useSettingStore } from '@/stores/setting';
 import { freshPinia } from '../../helpers';
 
-const { loadBoardListMock } = vi.hoisted(() => ({ loadBoardListMock: vi.fn() }));
+const { loadBoardListMock, realtimeMock, quoteSourceMock } = vi.hoisted(() => ({
+  loadBoardListMock: vi.fn(),
+  realtimeMock: vi.fn(),
+  quoteSourceMock: {
+    env: { live: true, todayTrading: true, useDb: false },
+    rows: vi.fn(),
+    idle: vi.fn(() => 60000),
+    envCalls: vi.fn(),
+  },
+}));
 
 vi.mock('@/api/eastmoney', async (importOriginal) => {
   const actual = await importOriginal();
   return {
     ...actual,
     EastmoneyApi: class {
-      async realtime() {
-        return [];
+      async realtime(...args) {
+        return realtimeMock(...args);
       }
     },
   };
 });
+
+vi.mock('@/utils/quoteSource', () => ({
+  isLiveQuoteWindow: () => quoteSourceMock.env.live,
+  idleDelayMs: () => quoteSourceMock.idle(),
+  loadQuoteEnvironment: (...args) => {
+    quoteSourceMock.envCalls(...args);
+    return Promise.resolve(quoteSourceMock.env);
+  },
+  loadQuoteRows: (...args) => quoteSourceMock.rows(...args),
+  fetchQuotes: async (api, symbols) => {
+    const secids = symbols.map((item) => item.secid);
+    quoteSourceMock.envCalls(secids);
+    const env = quoteSourceMock.env;
+    if (env.useDb) {
+      const rows = await quoteSourceMock.rows(secids);
+      if (rows.length) return { quotes: rows, delay: quoteSourceMock.idle(), source: 'db' };
+    }
+    const quotes = await api.realtime(symbols);
+    const base = env.live && env.todayTrading ? 4000 : 60000;
+    return { quotes, delay: quotes.length ? base : Math.min(base, 20000), source: 'api' };
+  },
+}));
 
 vi.mock('@/utils/db', async (importOriginal) => {
   const actual = await importOriginal();
@@ -82,11 +113,10 @@ const THS_BOARDS = [
 
 const wrappers = [];
 
-async function mountTable() {
+async function mountTable({ env, rows } = {}) {
   freshPinia();
   const monitor = useMonitorStore();
   const setting = useSettingStore();
-  setting.$persist = () => {};
   monitor.watchGroup = [
     { id: 0, id_str: '0', name: '自选', symbols: [] },
     { id: 1, id_str: '1', name: '行业', symbols: [], children: [] },
@@ -94,6 +124,13 @@ async function mountTable() {
   loadBoardListMock.mockImplementation(async (scope) =>
     scope === 'sw' ? SW_BOARDS : THS_BOARDS,
   );
+  realtimeMock.mockReset();
+  realtimeMock.mockResolvedValue([]);
+  quoteSourceMock.env = env || { live: true, todayTrading: true, useDb: false };
+  quoteSourceMock.rows.mockReset();
+  quoteSourceMock.rows.mockResolvedValue(rows || []);
+  quoteSourceMock.idle.mockClear();
+  quoteSourceMock.envCalls.mockClear();
   const wrapper = mount(SectorTable, { global: { plugins: [ElementPlus] } });
   wrappers.push(wrapper);
   await flushPromises();
@@ -153,6 +190,33 @@ describe('SectorTable · 板块列表', () => {
     expect(names(wrapper)).toEqual(['种植业', '养殖业']);
     expect(tableData(wrapper).every((row) => !row.hasChildren)).toBe(true);
     expect(loadBoardListMock).toHaveBeenLastCalledWith('ths');
+  });
+
+  it('非盘中且库已覆盖交易日时读库行情，不再请求接口', async () => {
+    const { wrapper } = await mountTable({
+      env: { live: false, todayTrading: true, useDb: true },
+      rows: [
+        { secid: '1.600000', range: 1.5, turn: 2.0 },
+        { secid: '1.600036', range: 2.5, turn: 4.0 },
+        { secid: '0.000858', range: -1.0, turn: 1.0 },
+      ],
+    });
+    const row = (name) => tableData(wrapper).find((r) => r.name === name);
+    expect(realtimeMock).not.toHaveBeenCalled();
+    expect(quoteSourceMock.envCalls).toHaveBeenCalledWith([
+      '1.600000',
+      '1.600036',
+      '0.000858',
+    ]);
+    expect(quoteSourceMock.rows).toHaveBeenCalledWith([
+      '1.600000',
+      '1.600036',
+      '0.000858',
+    ]);
+    expect(quoteSourceMock.idle).toHaveBeenCalled();
+    expect(row('电子').rangeText).toBe('2.00%');
+    expect(row('电子').turnText).toBe('3.00%');
+    expect(row('医药').rangeText).toBe('-1.00%');
   });
 
   it('涨跌幅与换手率取成分股实时行情的等权平均', async () => {

@@ -10,6 +10,7 @@ const {
   watchlistMock,
   industriesMock,
   saveQuotesMock,
+  cleanOrphanMock,
   reloadMock,
   realtimeMock,
   refreshIndustryMock,
@@ -18,6 +19,7 @@ const {
   watchlistMock: vi.fn(),
   industriesMock: vi.fn(),
   saveQuotesMock: vi.fn(),
+  cleanOrphanMock: vi.fn(),
   reloadMock: vi.fn(),
   realtimeMock: vi.fn(),
   refreshIndustryMock: vi.fn(),
@@ -31,6 +33,7 @@ vi.mock('@/utils/db', async (importOriginal) => {
     loadWatchlist: watchlistMock,
     loadIndustries: industriesMock,
     saveQuotes: saveQuotesMock,
+    cleanOrphanStocks: cleanOrphanMock,
   };
 });
 
@@ -120,6 +123,7 @@ beforeEach(() => {
   watchlistMock.mockReset().mockResolvedValue({ stocks: ROWS });
   industriesMock.mockReset().mockResolvedValue(INDUSTRIES);
   saveQuotesMock.mockReset().mockResolvedValue(null);
+  cleanOrphanMock.mockReset().mockResolvedValue({ removed: 0 });
   reloadMock.mockReset().mockResolvedValue({ reloaded: 1, failed: 0, skipped: 0 });
   realtimeMock.mockReset().mockImplementation(async (list) =>
     list.map(({ secid }) => ({ secid, name: '修复', price: 10, range: 1, amount: 0, turn: 1 })),
@@ -247,6 +251,38 @@ describe('Check · 数据校验窗口', () => {
     await flushPromises();
 
     expect(refreshIndustryMock).toHaveBeenCalledWith(['600519']);
+    expect(itemTags(wrapper)[0]).toBe('通过');
+  });
+
+  it('stocks 校验列出孤儿股票，修复时清理而不是重拉行情', async () => {
+    watchlistMock
+      .mockResolvedValueOnce({
+        stocks: [...ROWS, { secid: '0.000002', name: '孤儿股票', zx: false, price: 1 }],
+        notions: [],
+        members: [],
+      })
+      .mockResolvedValue({ stocks: ROWS, notions: [], members: [] });
+    cleanOrphanMock.mockResolvedValue({ removed: 1 });
+    const wrapper = mountCheck();
+
+    await itemButton(wrapper, 0, '校验').trigger('click');
+    await flushPromises();
+
+    expect(itemTags(wrapper)[0]).toBe('未通过');
+    expect(wrapper.findAll('.check-item-message')[0].text()).toContain(
+      '另有 1 只孤儿股票可清理',
+    );
+
+    await openDetail(wrapper, 0);
+    expect(detailIssues()[0]).toContain('孤儿股票 000002');
+    expect(detailIssues()[0]).toContain('不在自选或任何概念中');
+
+    await itemButton(wrapper, 0, '修复').trigger('click');
+    await flushPromises();
+
+    expect(cleanOrphanMock).toHaveBeenCalledWith(['0.000002']);
+    // 孤儿股票只清理，不能再拉行情把行写回来
+    expect(realtimeMock).not.toHaveBeenCalled();
     expect(itemTags(wrapper)[0]).toBe('通过');
   });
 

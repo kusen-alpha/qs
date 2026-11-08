@@ -8,16 +8,21 @@ import { freshPinia } from '../../helpers';
 const mocks = vi.hoisted(() => ({
   isTauriValue: true,
   label: 'main',
-  ensureFile: vi.fn(),
-  readData: vi.fn(),
-  writeData: vi.fn(),
-  migrateWatchGroup: vi.fn(),
+  legacyExists: vi.fn(),
+  readLegacyData: vi.fn(),
+  removeLegacyFiles: vi.fn(),
+  importLegacy: vi.fn(),
   loadWatchlist: vi.fn(),
   buildWatchGroup: vi.fn(),
   saveWatchGroup: vi.fn(),
+  loadSettings: vi.fn(),
+  saveSettings: vi.fn(),
+  loadSymbolConfigs: vi.fn(),
+  saveSymbolConfigs: vi.fn(),
   refreshBoardHistory: vi.fn(),
   syncWatchHistory: vi.fn(),
   ensureMarketWidthHistory: vi.fn(),
+  startNonTradingCalendar: vi.fn(),
   invoke: vi.fn(),
   getCurrentWindow: vi.fn(),
 }));
@@ -28,9 +33,9 @@ vi.mock('@/utils/env', () => ({
 }));
 
 vi.mock('@/utils/file', () => ({
-  ensureFile: mocks.ensureFile,
-  readData: mocks.readData,
-  writeData: mocks.writeData,
+  legacyExists: mocks.legacyExists,
+  readLegacyData: mocks.readLegacyData,
+  removeLegacyFiles: mocks.removeLegacyFiles,
   Files: {
     SETTINGS: { folder: '', file: 'settings.json', encrpt: false },
     MONITOR: { folder: '', file: 'monitor.dat', encrpt: true },
@@ -39,14 +44,22 @@ vi.mock('@/utils/file', () => ({
 }));
 
 vi.mock('@/utils/db', () => ({
-  migrateWatchGroup: mocks.migrateWatchGroup,
+  importLegacy: mocks.importLegacy,
   loadWatchlist: mocks.loadWatchlist,
   buildWatchGroup: mocks.buildWatchGroup,
   saveWatchGroup: mocks.saveWatchGroup,
+  loadSettings: mocks.loadSettings,
+  saveSettings: mocks.saveSettings,
+  loadSymbolConfigs: mocks.loadSymbolConfigs,
+  saveSymbolConfigs: mocks.saveSymbolConfigs,
   refreshBoardHistory: mocks.refreshBoardHistory,
 }));
 
 vi.mock('@/utils/klineSync', () => ({ syncWatchHistory: mocks.syncWatchHistory }));
+
+vi.mock('@/utils/nonTrading', () => ({
+  startNonTradingCalendar: mocks.startNonTradingCalendar,
+}));
 
 vi.mock('@/api/legulegu', () => ({
   ensureMarketWidthHistory: mocks.ensureMarketWidthHistory,
@@ -59,25 +72,25 @@ vi.mock('../../mocks/tauri-api.js', () => ({
   getCurrentWindow: mocks.getCurrentWindow,
 }));
 
-describe('stores/index · 主窗口数据初始化', () => {
+describe('stores/index · 数据库唯一来源初始化', () => {
   beforeEach(() => {
     vi.useFakeTimers();
     freshPinia();
-    // Pinia 插件在未挂载 app 时不会执行，手动补上 store 上的持久化方法
-    useSettingStore().$persist = () => {};
-    useMonitorStore().$persist = () => {};
-    useSymbolStore().$persist = () => {};
     mocks.isTauriValue = true;
     mocks.label = 'main';
     mocks.getCurrentWindow.mockImplementation(() => ({ label: mocks.label }));
-    mocks.ensureFile.mockResolvedValue(true);
-    mocks.readData.mockResolvedValue(null);
-    mocks.migrateWatchGroup.mockResolvedValue({ migrated: true });
+    mocks.legacyExists.mockResolvedValue(false);
+    mocks.readLegacyData.mockResolvedValue(null);
+    mocks.removeLegacyFiles.mockResolvedValue(undefined);
+    mocks.importLegacy.mockResolvedValue({ imported: true });
     mocks.loadWatchlist.mockResolvedValue({ stocks: [], notions: [], members: [] });
     mocks.buildWatchGroup.mockReturnValue([]);
+    mocks.loadSettings.mockResolvedValue(null);
+    mocks.loadSymbolConfigs.mockResolvedValue({});
     mocks.syncWatchHistory.mockResolvedValue({});
     mocks.refreshBoardHistory.mockResolvedValue({ days: 5 });
     mocks.ensureMarketWidthHistory.mockResolvedValue({});
+    mocks.startNonTradingCalendar.mockResolvedValue(undefined);
     mocks.invoke.mockResolvedValue(false);
   });
 
@@ -86,97 +99,106 @@ describe('stores/index · 主窗口数据初始化', () => {
     vi.useRealTimers();
   });
 
-  it('非 Tauri 环境直接早退，不读写任何文件', async () => {
+  it('非 Tauri 环境直接早退，不读库也不启动任务', async () => {
     mocks.isTauriValue = false;
     await initStores();
-    expect(mocks.ensureFile).not.toHaveBeenCalled();
-    expect(mocks.writeData).not.toHaveBeenCalled();
-    expect(mocks.migrateWatchGroup).not.toHaveBeenCalled();
-    expect(mocks.syncWatchHistory).not.toHaveBeenCalled();
-    expect(mocks.refreshBoardHistory).not.toHaveBeenCalled();
-    expect(mocks.ensureMarketWidthHistory).not.toHaveBeenCalled();
-  });
-
-  it('非 main 窗口同样早退，不触发迁移与补齐', async () => {
-    mocks.label = 'market';
-    await initStores();
-    expect(mocks.ensureFile).not.toHaveBeenCalled();
-    expect(mocks.migrateWatchGroup).not.toHaveBeenCalled();
+    expect(mocks.loadWatchlist).not.toHaveBeenCalled();
+    expect(mocks.loadSettings).not.toHaveBeenCalled();
     expect(mocks.syncWatchHistory).not.toHaveBeenCalled();
     expect(mocks.ensureMarketWidthHistory).not.toHaveBeenCalled();
+    expect(mocks.startNonTradingCalendar).not.toHaveBeenCalled();
   });
 
-  it('首次创建文件时写入三个 store 的初始快照，并迁移旧自选结构', async () => {
+  it('子窗口只从数据库回填，不迁移旧文件、不启动补齐任务', async () => {
+    mocks.label = 'group';
     await initStores();
+    expect(mocks.legacyExists).not.toHaveBeenCalled();
+    expect(mocks.importLegacy).not.toHaveBeenCalled();
+    expect(mocks.loadWatchlist).toHaveBeenCalledTimes(1);
+    expect(mocks.loadSettings).toHaveBeenCalledTimes(1);
+    expect(mocks.loadSymbolConfigs).toHaveBeenCalledTimes(1);
+    expect(mocks.syncWatchHistory).not.toHaveBeenCalled();
+    expect(mocks.ensureMarketWidthHistory).not.toHaveBeenCalled();
+    expect(mocks.startNonTradingCalendar).not.toHaveBeenCalled();
+  });
 
-    expect(mocks.ensureFile).toHaveBeenCalledTimes(3);
-    expect(mocks.writeData).toHaveBeenCalledTimes(3);
+  it('主窗口无旧文件时跳过迁移，只从数据库回填', async () => {
+    await initStores();
+    expect(mocks.legacyExists).toHaveBeenCalledTimes(3);
+    expect(mocks.importLegacy).not.toHaveBeenCalled();
+    expect(mocks.removeLegacyFiles).not.toHaveBeenCalled();
 
-    const [settingsCall, monitorCall, symbolCall] = mocks.writeData.mock.calls;
-    expect(settingsCall[1]).toBe('settings.json');
-    expect(settingsCall[2]).toMatchObject({ tableSize: 'small', fixedWidth: 380 });
-    expect(monitorCall[1]).toBe('monitor.dat');
-    expect(monitorCall[2].watchGroup[0]).toMatchObject({ name: '自选', id: 0 });
-    expect(symbolCall[1]).toBe('symbol.dat');
-    expect(symbolCall[2].configs).toEqual({});
+    const monitor = useMonitorStore();
+    expect(monitor.watchGroup).toEqual([{ name: '自选', id: 0, symbols: [] }]);
+    expect(useSymbolStore().configs).toEqual({});
+  });
 
-    expect(mocks.migrateWatchGroup).toHaveBeenCalledTimes(1);
-    expect(mocks.migrateWatchGroup.mock.calls[0][0][0]).toMatchObject({ name: '自选', id: 0 });
-    expect(mocks.buildWatchGroup).toHaveBeenCalledWith({
-      stocks: [],
-      notions: [],
-      members: [],
+  it('旧文件迁移成功后才删除文件', async () => {
+    mocks.legacyExists.mockResolvedValue(true);
+    mocks.readLegacyData.mockImplementation(async (file) => {
+      if (file === 'settings.json') return { tableSize: 'default' };
+      if (file === 'symbol.dat') return { configs: { '1.600519': { position: { num: 100 } } } };
+      if (file === 'monitor.dat') {
+        return { watchGroup: [{ name: '自选', id: 0, symbols: [{ secid: '1.600519' }] }] };
+      }
+      return null;
     });
+
+    await initStores();
+    expect(mocks.importLegacy).toHaveBeenCalledTimes(1);
+    expect(mocks.importLegacy).toHaveBeenCalledWith({
+      settings: { tableSize: 'default' },
+      symbolConfigs: { '1.600519': { position: { num: 100 } } },
+      groups: [{ name: '自选', id: 0, symbols: [{ secid: '1.600519' }] }],
+    });
+    expect(mocks.removeLegacyFiles).toHaveBeenCalledTimes(1);
   });
 
-  it('数据库为空时 loadFromDb 返回 false，保留本地默认自选', async () => {
-    const monitor = useMonitorStore();
-    const loaded = await monitor.loadFromDb();
-    expect(loaded).toBe(false);
-    expect(monitor.watchGroup).toHaveLength(1);
-    expect(monitor.watchGroup[0].symbols.map((s) => s.secid)).toEqual(['1.600519']);
+  it('迁移失败时保留旧文件，下次启动可重试', async () => {
+    mocks.legacyExists.mockResolvedValue(true);
+    mocks.importLegacy.mockResolvedValue(null);
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    await initStores();
+    expect(mocks.removeLegacyFiles).not.toHaveBeenCalled();
+
+    mocks.importLegacy.mockRejectedValueOnce(new Error('boom'));
+    await initStores();
+    expect(mocks.removeLegacyFiles).not.toHaveBeenCalled();
+    expect(errorSpy).toHaveBeenCalledWith('[legacy] 旧版数据迁移失败', expect.any(Error));
+    errorSpy.mockRestore();
   });
 
-  it('initStores 在数据库有数据时用其回填 monitor 并持久化快照', async () => {
+  it('旧文件探测异常时保住主流程，仍从数据库回填', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    mocks.legacyExists.mockRejectedValue(new Error('旧文件探测失败'));
+
+    await expect(initStores()).resolves.toBeUndefined();
+    expect(mocks.importLegacy).not.toHaveBeenCalled();
+    expect(mocks.removeLegacyFiles).not.toHaveBeenCalled();
+    expect(mocks.loadWatchlist).toHaveBeenCalledTimes(1);
+    expect(mocks.loadSettings).toHaveBeenCalledTimes(1);
+    expect(mocks.loadSymbolConfigs).toHaveBeenCalledTimes(1);
+    expect(errorSpy).toHaveBeenCalledWith('[legacy] 旧版数据迁移失败', expect.any(Error));
+    errorSpy.mockRestore();
+  });
+
+  it('数据库有数据时用其回填 monitor', async () => {
     const monitor = useMonitorStore();
-    const persistSpy = vi.spyOn(monitor, '$persist');
     mocks.buildWatchGroup.mockReturnValue([
       { name: '自选', id: 0, symbols: [] },
       { name: '白酒', id: 1, symbols: [] },
     ]);
 
     await initStores();
-
     expect(monitor.watchGroup.map((g) => g.name)).toEqual(['自选', '白酒']);
-    expect(persistSpy).toHaveBeenCalled();
   });
 
-  it('已有文件时读回数据并覆盖对应 store 状态，不写初始快照', async () => {
-    mocks.ensureFile.mockResolvedValue(false);
-    mocks.readData.mockImplementation(async (folder, file) => {
-      if (file === 'settings.json') return { tableSize: 'default', isOpenWithSystem: true };
-      if (file === 'symbol.dat') {
-        return { configs: { '1.600519': { position: { num: 100 } } } };
-      }
-      return null;
-    });
-
-    const setting = useSettingStore();
-    const symbol = useSymbolStore();
+  it('数据库为空时 monitor 仍保留一个空的自选组', async () => {
+    const monitor = useMonitorStore();
     await initStores();
-
-    expect(mocks.writeData).not.toHaveBeenCalled();
-    expect(setting.tableSize).toBe('default');
-    expect(setting.fixedWidth).toBe(380); // 未回填的字段保留默认值
-    expect(symbol.configs['1.600519']).toEqual({ position: { num: 100 } });
-  });
-
-  it('文件存在但内容为空时保留各 store 默认值', async () => {
-    mocks.ensureFile.mockResolvedValue(false);
-    await initStores();
-    expect(useSettingStore().tableSize).toBe('small');
-    expect(useMonitorStore().watchGroup[0].name).toBe('自选');
-    expect(useSymbolStore().configs).toEqual({});
+    expect(monitor.watchGroup).toHaveLength(1);
+    expect(monitor.watchGroup[0].symbols).toEqual([]);
   });
 
   it('启动补齐日K 延后 5 秒执行，异常只记录日志不抛出', async () => {
@@ -226,12 +248,19 @@ describe('stores/index · 主窗口数据初始化', () => {
     errorSpy.mockRestore();
   });
 
+  it('主窗口启动非交易日回填与探测任务，失败只记录日志不阻塞初始化', async () => {
+    await initStores();
+    expect(mocks.startNonTradingCalendar).toHaveBeenCalledTimes(1);
+
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    mocks.startNonTradingCalendar.mockRejectedValue(new Error('probe boom'));
+    await expect(initStores()).resolves.toBeUndefined();
+    expect(errorSpy).toHaveBeenCalledWith('[probe] 非交易日任务启动失败', expect.any(Error));
+    errorSpy.mockRestore();
+  });
+
   it('开机自启状态与设置不一致时会调用对应插件命令', async () => {
-    mocks.ensureFile.mockResolvedValue(false);
-    mocks.readData.mockImplementation(async (folder, file) => {
-      if (file === 'settings.json') return { isOpenWithSystem: true };
-      return null;
-    });
+    mocks.loadSettings.mockResolvedValue({ isOpenWithSystem: true });
     mocks.invoke.mockImplementation(async (cmd) =>
       cmd === 'plugin:autostart|is_enabled' ? false : undefined,
     );
@@ -242,7 +271,6 @@ describe('stores/index · 主窗口数据初始化', () => {
   });
 
   it('系统已开启自启但设置为关闭时调用 disable', async () => {
-    mocks.ensureFile.mockResolvedValue(false);
     mocks.invoke.mockImplementation(async (cmd) =>
       cmd === 'plugin:autostart|is_enabled' ? true : undefined,
     );
@@ -253,10 +281,8 @@ describe('stores/index · 主窗口数据初始化', () => {
   });
 
   it('自启插件不可用时异常被吞掉，initStores 正常完成', async () => {
-    mocks.ensureFile.mockResolvedValue(false);
     mocks.invoke.mockRejectedValue(new Error('plugin missing'));
 
     await expect(initStores()).resolves.toBeUndefined();
-    expect(mocks.migrateWatchGroup).toHaveBeenCalledTimes(1);
   });
 });

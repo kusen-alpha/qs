@@ -55,6 +55,7 @@ import { on } from '../../utils/events';
 import { applyDragRegion } from '../../utils/layout';
 import { aggregateSignDays } from '../../utils/macd';
 import { EastmoneyApi, toNumber } from '../../api/eastmoney';
+import { fetchQuotes, isLiveQuoteWindow } from '../../utils/quoteSource';
 
 const setting = useSettingStore();
 const monitor = useMonitorStore();
@@ -234,12 +235,14 @@ async function loopRealtime() {
   if (disposed) return;
   let delay = 4000;
   try {
-    const data = await api.realtime(realtimeSymbols.value);
+    // 本窗口要展示的标的：只有它们都刷新到最近交易日才允许读库
+    const result = await fetchQuotes(api, realtimeSymbols.value);
     if (disposed) return;
-    quotes.value = data;
+    quotes.value = result.quotes;
+    delay = result.delay;
   } catch (e) {
     console.error(e);
-    delay = 20000;
+    delay = isLiveQuoteWindow() ? 20000 : 60000;
   }
   if (disposed) return;
   timer = setTimeout(loopRealtime, delay);
@@ -250,14 +253,14 @@ onMounted(async () => {
   ensureMacd();
   applyDragRegion(['el-table__cell', 'cell', 'el-table__empty-block', 'el-table__empty-text']);
   offs.push(
-    await on('stateChange', () => {
-      monitor.$hydrate({ runHooks: false });
+    await on('stateChange', async () => {
+      await monitor.loadFromDb();
       ensureMacd();
     }),
   );
   offs.push(
-    await on('settingChange', () => {
-      setting.$hydrate({ runHooks: false });
+    await on('settingChange', async () => {
+      await setting.loadFromDb();
     }),
   );
 });

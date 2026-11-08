@@ -232,8 +232,8 @@ watch(list, () => {
 
 onMounted(async () => {
   offs.push(
-    await on('stateChange', () => {
-      monitor.$hydrate({ runHooks: false });
+    await on('stateChange', async () => {
+      await monitor.loadFromDb();
       markAdded(list.value);
     }),
   );

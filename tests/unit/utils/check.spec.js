@@ -8,6 +8,7 @@ vi.mock('@/utils/db', async (importOriginal) => {
     loadWatchlist: vi.fn(),
     loadIndustries: vi.fn(),
     saveQuotes: vi.fn(),
+    cleanOrphanStocks: vi.fn(),
   };
 });
 
@@ -31,6 +32,7 @@ import {
   checkWatchHistory,
   evaluateHistory,
   evaluateStocksData,
+  repairOrphanStocks,
   repairStocksData,
 } from '@/utils/check';
 
@@ -108,6 +110,52 @@ describe('check · 历史数据齐全度判定', () => {
       '1.600519': candles(FULL_DATES.slice(0, -1)),
       '0.000001': candles(FULL_DATES),
     });
+
+    expect(result.issues).toHaveLength(1);
+    expect(result.issues[0].last).toBe('2026-11-02');
+    expect(result.issues[0].reasons).toContain('最新 2026-11-02，落后 1 个交易日');
+  });
+
+  it('落后天数按库内真实交易日计数，长假不会被周末算法夸大', () => {
+    // 库内日历：09-29、09-30 之后直接跳到 10-08、10-09（国庆长假没有交易日）
+    const base = ['2024-01-02', '2024-01-03', '2026-09-29', '2026-09-30'];
+    const result = evaluateHistory(STOCKS, {
+      '1.600519': candles(base),
+      '0.000001': candles([...base, '2026-10-08', '2026-10-09']),
+    });
+
+    expect(result.issues).toHaveLength(1);
+    expect(result.issues[0].last).toBe('2026-09-30');
+    expect(result.issues[0].reasons).toContain('最新 2026-09-30，落后 2 个交易日');
+  });
+
+  it('15:15 前忽略仅用于展示的当日合成K线，避免误报落后', () => {
+    // 2026-11-03 周二 10:00 盘中：loadHistory 会给已刷新行情的股票合成当天K线
+    const now = new Date(2026, 10, 3, 10, 0);
+    const result = evaluateHistory(
+      STOCKS,
+      {
+        '1.600519': candles(FULL_DATES),
+        '0.000001': candles(FULL_DATES.slice(0, -1)),
+      },
+      now,
+    );
+
+    expect(result.status).toBe('ok');
+    expect(result.marketLast).toBe('2026-11-02');
+    expect(result.issues).toEqual([]);
+  });
+
+  it('15:15 后当日已收盘，当天K线参与落后判定', () => {
+    const now = new Date(2026, 10, 3, 15, 30);
+    const result = evaluateHistory(
+      STOCKS,
+      {
+        '1.600519': candles(FULL_DATES),
+        '0.000001': candles(FULL_DATES.slice(0, -1)),
+      },
+      now,
+    );
 
     expect(result.issues).toHaveLength(1);
     expect(result.issues[0].last).toBe('2026-11-02');
@@ -290,6 +338,71 @@ describe('check · stocks 表数据判定', () => {
       '缺少申万二级行业',
       '缺少同花顺行业',
     ]);
+  });
+});
+
+describe('check · 孤儿股票判定', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    db.loadIndustries.mockResolvedValue(INDUSTRIES);
+  });
+
+  it('传入引用集合时把失去全部引用的股票列为可清理项', () => {
+    const rows = [...STOCK_ROWS, { secid: '0.000002', name: '孤儿股票', price: 1 }];
+    const result = evaluateStocksData(
+      STOCKS,
+      rows,
+      INDUSTRIES,
+      new Set(['1.600519', '0.000001']),
+    );
+
+    expect(result.status).toBe('fail');
+    // 孤儿不计入自选完整数
+    expect(result.complete).toBe(2);
+    expect(result.issues).toHaveLength(1);
+    expect(result.issues[0]).toMatchObject({ secid: '0.000002', orphan: true });
+    expect(result.summary).toBe('共 2 只自选股，stocks 数据齐全；另有 1 只孤儿股票可清理');
+  });
+
+  it('没有名称的行业/板块缓存行不算孤儿', () => {
+    const rows = [...STOCK_ROWS, { secid: '0.000002', name: '', price: 1 }];
+    const result = evaluateStocksData(
+      STOCKS,
+      rows,
+      INDUSTRIES,
+      new Set(['1.600519', '0.000001']),
+    );
+
+    expect(result.status).toBe('ok');
+    expect(result.issues).toEqual([]);
+  });
+
+  it('按数据库中的自选与概念成员识别孤儿股票', async () => {
+    db.loadWatchlist.mockResolvedValue({
+      stocks: [
+        { ...STOCK_ROWS[0], zx: true },
+        { ...STOCK_ROWS[1], zx: false },
+        { secid: '0.000002', name: '孤儿股票', zx: false },
+        { secid: '0.000003', name: '', zx: false, industry1: '银行' },
+      ],
+      notions: [],
+      members: [{ notion_id: 1, secid: '0.000001' }],
+    });
+
+    const result = await checkStocksData(STOCKS);
+
+    expect(result.issues.map((issue) => issue.secid)).toEqual(['0.000002']);
+    expect(result.issues[0].orphan).toBe(true);
+  });
+
+  it('修复孤儿股票时只清理、不拉行情', async () => {
+    db.cleanOrphanStocks.mockResolvedValue({ removed: 1 });
+
+    const result = await repairOrphanStocks(['0.000002', '']);
+
+    expect(db.cleanOrphanStocks).toHaveBeenCalledWith(['0.000002']);
+    expect(result).toEqual({ removed: 1 });
+    expect(realtimeMock).not.toHaveBeenCalled();
   });
 });
 

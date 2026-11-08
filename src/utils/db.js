@@ -7,14 +7,66 @@ import { isTauri } from './env';
  * 浏览器环境没有数据库，统一返回空结果，便于纯前端调试与单测。
  */
 
-/** 把旧版 monitor.dat 的自选/概念一次性导入数据库（Rust 侧幂等） */
-export async function migrateWatchGroup(groups) {
-  if (!isTauri()) return { migrated: false, skipped: true };
+/** 读取软件设置（数据库为唯一来源），无记录返回 null */
+export async function loadSettings() {
+  if (!isTauri()) return null;
   try {
-    return await invoke('db_migrate_watchgroup', { groups: JSON.stringify(groups || []) });
+    const data = await invoke('db_load_settings');
+    return data ? data.settings : null;
   } catch (e) {
-    console.error('[db] 自选数据迁移失败', e);
-    return { migrated: false, error: String(e) };
+    console.error('[db] 读取设置失败', e);
+    return null;
+  }
+}
+
+/** 保存整份软件设置 */
+export async function saveSettings(settings) {
+  if (!isTauri()) return null;
+  try {
+    return await invoke('db_save_settings', { payload: JSON.stringify(settings || {}) });
+  } catch (e) {
+    console.error('[db] 保存设置失败', e);
+    return null;
+  }
+}
+
+/** 读取全部个股持仓/提醒配置 */
+export async function loadSymbolConfigs() {
+  if (!isTauri()) return {};
+  try {
+    const data = await invoke('db_load_symbol_configs');
+    return (data && data.configs) || {};
+  } catch (e) {
+    console.error('[db] 读取持仓配置失败', e);
+    return {};
+  }
+}
+
+/** 整份覆盖保存个股持仓/提醒配置 */
+export async function saveSymbolConfigs(configs) {
+  if (!isTauri()) return null;
+  try {
+    return await invoke('db_save_symbol_configs', { payload: JSON.stringify(configs || {}) });
+  } catch (e) {
+    console.error('[db] 保存持仓配置失败', e);
+    return null;
+  }
+}
+
+/** 旧版 profile 文件一次性迁入数据库；成功返回结果，失败返回 null（调用方据此决定是否删除旧文件） */
+export async function importLegacy({ settings, symbolConfigs, groups }) {
+  if (!isTauri()) return null;
+  try {
+    return await invoke('db_import_legacy', {
+      payload: JSON.stringify({
+        settings: settings ?? null,
+        symbol_configs: symbolConfigs ?? {},
+        groups: groups ?? [],
+      }),
+    });
+  } catch (e) {
+    console.error('[db] 旧版数据迁移失败', e);
+    return null;
   }
 }
 
@@ -44,6 +96,18 @@ export async function saveWatchGroup(groups) {
 function toYi(value) {
   const num = typeof value === 'number' ? value : Number(value);
   return Number.isFinite(num) ? num / 1e8 : null;
+}
+
+/** 数据校验修复：删除失去全部引用的孤儿股票，并连带清理日K、板块成分与板块日线 */
+export async function cleanOrphanStocks(secids = []) {
+  const list = (secids || []).filter(Boolean);
+  if (!isTauri() || !list.length) return { removed: 0 };
+  try {
+    return await invoke('db_clean_orphan_stocks', { secids: JSON.stringify(list) });
+  } catch (e) {
+    console.error('[db] 清理孤儿股票失败', e);
+    return null;
+  }
 }
 
 /** 每轮实时行情批量写回 stocks（停牌缺值沿用库内旧值） */
@@ -316,7 +380,35 @@ export async function replaceHistory(secid, candles) {
   }
 }
 
-/** 需要校验日K的股票（自选 + 已有历史的股票）：{ secid, last_date, latest_turnover }[] */
+/** 区间替换某股票的日K：先删 [beg, end] 区间再写入，用于清理源端已不存在的日期 */
+export async function replaceHistoryRange(secid, beg, end, candles) {
+  if (!isTauri() || !secid || !beg || !end) return null;
+  try {
+    return await invoke('db_replace_history_range', {
+      secid,
+      beg,
+      end,
+      candles: JSON.stringify(candles || []),
+    });
+  } catch (e) {
+    console.error('[db] 区间替换K线失败', e);
+    return null;
+  }
+}
+
+/** 未收盘时清理当天残留的K线（15:15 前当天K线必然不完整） */
+export async function pruneTodayHistory(date) {
+  if (!isTauri() || !date) return null;
+  try {
+    const data = await invoke('db_prune_today_history', { date });
+    return data ? data.removed : null;
+  } catch (e) {
+    console.error('[db] 清理当天K线失败', e);
+    return null;
+  }
+}
+
+/** 需要校验日K的股票（自选 + 已有历史的股票）：{ secid, last_date, missing_fields }[] */
 export async function loadHistoryTargets() {
   if (!isTauri()) return [];
   try {
@@ -331,7 +423,7 @@ export async function loadHistoryTargets() {
 /**
  * 把数据库行拼回 watchGroup 结构：
  * 自选 = stocks.zx=1（顺序由数据库返回顺序决定）；概念树 = notions(pid) + notion_stocks。
- * 股票代码由 secid 拆出，数据库不单独存 code。数据库为空时返回 []，调用方保留原有数据。
+ * 股票代码由 secid 拆出，数据库不单独存 code。数据库为空时返回 []，调用方补空自选组。
  */
 export function buildWatchGroup({ stocks = [], notions = [], members = [] } = {}) {
   if (!stocks.length && !notions.length) return [];
@@ -396,6 +488,50 @@ export async function stats() {
   } catch (e) {
     console.error('[db] 读取数据库统计失败', e);
     return null;
+  }
+}
+
+/** 历史非交易日回填：区间内 histories 全无数据的日期写入 non_trading_days，已有数据的自动删除 */
+export async function syncNonTradingDays(start, end) {
+  if (!isTauri() || !start || !end) return null;
+  try {
+    return await invoke('db_sync_non_trading_days', { start, end });
+  } catch (e) {
+    console.error('[db] 回填非交易日失败', e);
+    return null;
+  }
+}
+
+/** 标记/清除单日非交易日（盘中探测结论落库），source 缺省为 probe */
+export async function setNonTradingDay(date, nonTrading, source = 'probe') {
+  if (!isTauri() || !date) return null;
+  try {
+    return await invoke('db_set_non_trading_day', { date, nonTrading, source });
+  } catch (e) {
+    console.error('[db] 标记非交易日失败', e);
+    return null;
+  }
+}
+
+/** 行情来源判定：返回 today/todayTrading/liveWindow/latestTradingDay/syncedDate/useDb */
+export async function loadQuoteMarketStatus(secids) {
+  if (!isTauri()) return null;
+  try {
+    return await invoke('db_quote_market_status', { secids: secids || [] });
+  } catch (e) {
+    console.error('[db] 读取行情时段失败', e);
+    return null;
+  }
+}
+
+/** 批量读取库内行情快照（字段与实时行情对齐，供库优先展示） */
+export async function loadQuotes(secids) {
+  if (!isTauri() || !secids?.length) return [];
+  try {
+    return (await invoke('db_load_quotes', { secids })) || [];
+  } catch (e) {
+    console.error('[db] 读取行情快照失败', e);
+    return [];
   }
 }
 

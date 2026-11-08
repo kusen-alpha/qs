@@ -37,8 +37,7 @@ async function mountSearch(options = {}) {
   const { rows = ROWS, concepts = CONCEPTS, symbols = [] } = options;
   freshPinia();
   const monitor = useMonitorStore();
-  monitor.$persist = () => {};
-  monitor.$hydrate = () => {};
+  monitor.loadFromDb = vi.fn(async () => true);
   monitor.watchGroup = [{ name: '自选', id: 0, symbols }];
 
   requestMock.mockReset();
@@ -294,6 +293,7 @@ describe('Search · 股票搜索面板', () => {
       source: '1',
     });
     await emit('stateChange', {});
+    await flushPromises();
     await nextTick();
 
     expect(wrapper.vm.list[0].IsAddCurGroup).toBe(true);

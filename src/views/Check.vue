@@ -148,6 +148,7 @@ import { useMonitorStore } from '../stores/monitor';
 import {
   checkStocksData,
   checkWatchHistory,
+  repairOrphanStocks,
   repairStocksData,
   repairWatchHistory,
 } from '../utils/check';
@@ -161,9 +162,15 @@ const CHECKS = [
   {
     key: 'stocks',
     name: '校验 stocks 表股票数据',
-    desc: '检查自选股票在 stocks 表中是否有记录，且名称、现价、涨跌幅、换手率、申万行业、同花顺行业是否齐全',
+    desc: '检查自选股票在 stocks 表中是否有记录，且名称、现价、涨跌幅、换手率、申万行业、同花顺行业是否齐全；同时清理已不属于自选或任何概念的孤儿股票',
     run: () => checkStocksData(stocks.value),
-    fix: (result) => repairStocksData(result.issues.map((issue) => issue.secid)),
+    fix: async (result) => {
+      const issues = result.issues || [];
+      const orphanSecids = issues.filter((issue) => issue.orphan).map((issue) => issue.secid);
+      const otherSecids = issues.filter((issue) => !issue.orphan).map((issue) => issue.secid);
+      await repairOrphanStocks(orphanSecids);
+      await repairStocksData(otherSecids);
+    },
   },
   {
     key: 'history',

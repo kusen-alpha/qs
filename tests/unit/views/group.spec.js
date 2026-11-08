@@ -1,21 +1,20 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { mount } from '@vue/test-utils';
-import ElementPlus from 'element-plus';
+import { flushPromises, mount } from '@vue/test-utils';
+import ElementPlus, { ElMessage } from 'element-plus';
 import Group from '@/views/Group.vue';
 import { useMonitorStore } from '@/stores/monitor';
 import { useCacheStore } from '@/stores/cache';
+import { useSymbolStore } from '@/stores/symbol';
+import { emit } from '@/utils/events';
 import { freshPinia } from '../../helpers';
 
+const { isTauriMock } = vi.hoisted(() => ({ isTauriMock: vi.fn(() => false) }));
+
+vi.mock('@/utils/env', async (importOriginal) => {
+  const actual = await importOriginal();
+  return { ...actual, isTauri: () => isTauriMock() };
+});
 vi.mock('@/utils/layout', () => ({ applyDragRegion: vi.fn() }));
-vi.mock('@/utils/file', () => ({
-  writeData: vi.fn(),
-  readData: vi.fn(async () => null),
-  Files: {
-    SETTINGS: { folder: '', file: 'settings.json', encrpt: false },
-    MONITOR: { folder: '', file: 'monitor.dat', encrpt: true },
-    SYMBOL: { folder: '', file: 'symbol.dat', encrpt: true },
-  },
-}));
 vi.mock('@/utils/events', () => ({ emit: vi.fn(), on: vi.fn() }));
 
 function mountGroup() {
@@ -40,6 +39,7 @@ describe('Group 页面 · 分组编辑窗口', () => {
   let ctx;
 
   beforeEach(() => {
+    isTauriMock.mockReturnValue(false);
     ctx = mountGroup();
   });
 
@@ -81,5 +81,54 @@ describe('Group 页面 · 分组编辑窗口', () => {
     const { wrapper } = ctx;
     expect(wrapper.find('.tips-text').text()).toContain('调整概念顺序');
     expect(wrapper.find('#titlebar-close').exists()).toBe(true);
+  });
+
+  it('保存成功后清理已从自选删除的提醒/持仓配置', async () => {
+    const { wrapper, cache, persist } = ctx;
+    const symbol = useSymbolStore();
+    const del = vi.spyOn(symbol, 'deleteSymbolConfig').mockImplementation(() => {});
+    cache.group[0].symbols = [];
+    cache.removedWatchSecids = ['1.600519'];
+    persist.mockResolvedValueOnce({ removed_stocks: 1 });
+
+    await wrapper.find('.save-button').trigger('click');
+    await flushPromises();
+
+    expect(del).toHaveBeenCalledWith('1.600519');
+    expect(cache.removedWatchSecids).toEqual([]);
+  });
+
+  it('保存前重新加回自选的股票不清理配置', async () => {
+    const { wrapper, cache, persist } = ctx;
+    const symbol = useSymbolStore();
+    const del = vi.spyOn(symbol, 'deleteSymbolConfig').mockImplementation(() => {});
+    cache.removedWatchSecids = ['1.600519'];
+    persist.mockResolvedValueOnce({ removed_stocks: 1 });
+
+    await wrapper.find('.save-button').trigger('click');
+    await flushPromises();
+
+    expect(del).not.toHaveBeenCalled();
+    expect(cache.removedWatchSecids).toEqual([]);
+  });
+
+  it('保存落库失败时回滚快照、提示错误且保留待清理记录', async () => {
+    const { wrapper, cache, monitor, persist } = ctx;
+    const error = vi.spyOn(ElMessage, 'error').mockImplementation(() => {});
+    isTauriMock.mockReturnValue(true);
+    cache.group[0].symbols = [];
+    cache.removedWatchSecids = ['1.600519'];
+    persist.mockResolvedValueOnce(null);
+
+    await wrapper.find('.save-button').trigger('click');
+    await flushPromises();
+
+    expect(error).toHaveBeenCalled();
+    // persist 被替身后不会广播，这条事件只能来自失败后的回滚广播
+    expect(emit).toHaveBeenCalledWith('stateChange', 'rollbackWatchList');
+    expect(monitor.watchGroup).not.toBe(cache.group);
+    expect(monitor.watchGroup[0].symbols.map((s) => s.secid)).toEqual(['1.600519']);
+    // 失败时不能清空待清理记录，否则重试保存就没机会删配置
+    expect(cache.removedWatchSecids).toEqual(['1.600519']);
   });
 });

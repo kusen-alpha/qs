@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   EastmoneyApi,
   calcPosition,
@@ -9,6 +9,10 @@ import {
   summarizeProfit,
   toNumber,
 } from '@/api/eastmoney';
+
+const net = vi.hoisted(() => ({ request: vi.fn(), saveQuotes: vi.fn() }));
+vi.mock('@/utils/http', () => ({ request: net.request }));
+vi.mock('@/utils/db', () => ({ saveQuotes: net.saveQuotes }));
 
 const api = new EastmoneyApi();
 
@@ -35,11 +39,40 @@ describe('eastmoney · 实时行情映射', () => {
     expect(api.processRealtimeData([])).toEqual([]);
   });
 
-  it('processRealtimeData 映射交易所行情时间 f86，供后端判断当天是否真的刷新过', () => {
+  it('processRealtimeData 映射交易所行情时间 f124，供后端判断当天是否真的刷新过', () => {
     const [row] = api.processRealtimeData([
-      { f12: '600519', f13: 1, f14: '贵州茅台', f2: 1500, f86: 1762300200 },
+      { f12: '600519', f13: 1, f14: '贵州茅台', f2: 1500, f124: 1762300200 },
     ]);
     expect(row.time).toBe(1762300200);
+  });
+
+  it('processRealtimeData 不再把 f86 当成时间戳（该字段不是成交时间）', () => {
+    const [row] = api.processRealtimeData([
+      { f12: '600519', f13: 1, f14: '贵州茅台', f2: 1500, f86: 34.58 },
+    ]);
+    expect(row.time).toBeUndefined();
+  });
+});
+
+describe('eastmoney · 实时行情请求与写库', () => {
+  it('请求字段包含 f124（成交时间戳）', async () => {
+    net.request.mockResolvedValue({ ok: true, data: { data: { diff: [] } } });
+    await api.realtime([{ secid: '1.600519' }]);
+    expect(net.request.mock.calls[0][0]).toContain('f124');
+  });
+
+  it('默认写库，非交易日探测传 save=false 时只读不写', async () => {
+    net.request.mockResolvedValue({
+      ok: true,
+      data: { data: { diff: [{ f12: '600519', f13: 1, f2: 1500, f124: 1762300200 }] } },
+    });
+    const rows = await api.realtime([{ secid: '1.600519' }]);
+    expect(rows).toHaveLength(1);
+    expect(net.saveQuotes).toHaveBeenCalledTimes(1);
+
+    net.saveQuotes.mockClear();
+    await api.realtime([{ secid: '1.600519' }], false);
+    expect(net.saveQuotes).not.toHaveBeenCalled();
   });
 });
 

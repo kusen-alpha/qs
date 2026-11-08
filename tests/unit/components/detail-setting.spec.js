@@ -24,8 +24,6 @@ const wrappers = [];
 async function mountSetting(props = {}, configs = {}) {
   freshPinia();
   const symbol = useSymbolStore();
-  symbol.$persist = () => {};
-  symbol.$hydrate = () => {};
   symbol.configs = configs;
   const wrapper = mount(DetailSetting, {
     props: {

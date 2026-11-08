@@ -28,6 +28,10 @@
       "allow": [{ "path": "$APPDATA/**" }]
     },
     {
+      "identifier": "fs:allow-remove",
+      "allow": [{ "path": "$APPDATA/**" }]
+    },
+    {
       "identifier": "http:default",
       "allow": [
         { "url": "https://searchadapter.eastmoney.com/*" },

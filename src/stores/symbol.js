@@ -1,9 +1,9 @@
 import { defineStore } from 'pinia';
 import { isEqual, isNull } from 'lodash-es';
 import { emit } from '../utils/events';
-import { readData, writeData, Files } from '../utils/file';
+import { loadSymbolConfigs, saveSymbolConfigs } from '../utils/db';
 
-/** 原产物 SymbolStore(uO)：每只股票的持仓 / 提醒配置 */
+/** 每只股票的持仓 / 提醒配置：数据库是唯一来源 */
 export const useSymbolStore = defineStore('symbol', {
   state: () => ({
     configs: {},
@@ -23,11 +23,16 @@ export const useSymbolStore = defineStore('symbol', {
     },
   },
   actions: {
-    deleteSymbolConfig(secid) {
+    /** 从数据库回填；空库即空配置 */
+    async loadFromDb() {
+      this.configs = await loadSymbolConfigs();
+      return true;
+    },
+    async deleteSymbolConfig(secid) {
       if (this.configs[secid]) {
         delete this.configs[secid];
-        this.$persist();
-        writeData(Files.SYMBOL.folder, Files.SYMBOL.file, JSON.parse(JSON.stringify(this.$state)), true);
+        await saveSymbolConfigs(JSON.parse(JSON.stringify(this.configs)));
+        emit('symbolConfigChange', {});
       }
     },
     async addConfig(config) {
@@ -42,17 +47,8 @@ export const useSymbolStore = defineStore('symbol', {
         if (isEqual(this.configs[config.secid], config)) return;
         this.configs[config.secid] = config;
       }
-      this.$persist();
-      await writeData(Files.SYMBOL.folder, Files.SYMBOL.file, JSON.parse(JSON.stringify(this.$state)), true);
+      await saveSymbolConfigs(JSON.parse(JSON.stringify(this.configs)));
       emit('symbolConfigChange', {});
     },
-    readConfig() {
-      readData(Files.SYMBOL.folder, Files.SYMBOL.file, true).then((data) => {
-        if (data) this.configs = data.configs;
-      });
-    },
-  },
-  persist: {
-    storage: localStorage,
   },
 });

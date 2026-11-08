@@ -9,6 +9,14 @@ const API_URL = 'https://legulegu.com/api/stockdata/member-ship/ma-market-width'
 /* 接口要求带站点访客 Cookie（LAAA，只校验存在不校验取值）与当天日期 MD5 token */
 let visitor = { day: '', uuid: '' };
 let dataCache = { day: '', value: null };
+/* 同一窗口内并发刷新共享同一次请求 */
+let refreshInFlight = null;
+
+/* 最近一次成功增量刷新的时间，跨窗口共享（localStorage），TTL 内不再重复请求接口 */
+const REFRESH_KEY = 'marketWidth.lastRefresh';
+const REFRESH_TTL = 10 * 60 * 1000;
+/* 接口超时：8 秒未返回即中止，避免窗口一直等待 */
+const REQUEST_TIMEOUT = 8000;
 
 function ymd(date) {
   const pad = (n) => (n < 10 ? '0' + n : String(n));
@@ -35,6 +43,31 @@ function visitorCookie() {
   return `LAAA=${visitor.uuid}`;
 }
 
+/* 读取最近一次成功刷新的时间戳；非当天记录视为过期 */
+function lastRefreshAt() {
+  try {
+    const info = JSON.parse(localStorage.getItem(REFRESH_KEY) || 'null');
+    if (!info || info.day !== today() || !Number.isFinite(info.at)) return 0;
+    return info.at;
+  } catch (e) {
+    return 0;
+  }
+}
+
+/* 当天且 TTL 内已成功刷新过，可跳过接口请求 */
+export function refreshedRecently() {
+  const at = lastRefreshAt();
+  return !!at && Date.now() - at < REFRESH_TTL;
+}
+
+function markRefreshed() {
+  try {
+    localStorage.setItem(REFRESH_KEY, JSON.stringify({ day: today(), at: Date.now() }));
+  } catch (e) {
+    /* 存储不可用时忽略，退化为仅本窗口内的缓存 */
+  }
+}
+
 /* sckd 落库起点，与个股历史一致；早于此日期的市场宽度不保存 */
 export const MARKET_WIDTH_MIN_DATE = '2024-01-01';
 /* 2024 年首个交易日（元旦休市），允许年初假期余量后即视为已覆盖完整区间 */
@@ -58,7 +91,15 @@ function requestApi(startDate = MARKET_WIDTH_MIN_DATE) {
   const url =
     `${API_URL}?level=1&startDate=${startDate}&endDate=${today()}` +
     `&maType=value20&token=${tokenOf()}`;
-  return request(url, { headers: requestHeaders() });
+  /* 超时后中止请求，调用方按接口失败处理（库内数据仍可展示） */
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT);
+  return request(url, { headers: requestHeaders(), signal: controller.signal })
+    .catch((e) => {
+      if (controller.signal.aborted) throw new Error('市场宽度接口请求超时');
+      throw e;
+    })
+    .finally(() => clearTimeout(timer));
 }
 
 function parsePayload(res) {
@@ -110,27 +151,67 @@ export async function ensureMarketWidthHistory() {
   return loadMarketWidth(true);
 }
 
-/* 默认从数据库读取；接口成功时把最新数据写回 sckd（新交易日自动累积），
-   接口不可用时回落到库内数据。当天只取一次，弹窗反复打开不再重复请求。 */
+/* 仅读本地库（不请求接口），供窗口先渲染；库内无数据时返回 null */
+export async function loadMarketWidthFromDb() {
+  const stored = await loadMarketWidthDb();
+  return hasData(stored) ? stored : null;
+}
+
+/* 增量刷新：以库内最大交易日为起点向接口补齐，成功后落库并返回库内完整历史。
+   TTL 内已刷新过、或后台刷新失败时返回 null（不打断已渲染的库内数据）。 */
+export async function refreshMarketWidth({ force = false } = {}) {
+  if (!force && refreshedRecently()) return null;
+  if (!force && refreshInFlight) return refreshInFlight;
+
+  const task = runRefresh(force);
+  refreshInFlight = task;
+  try {
+    return await task;
+  } finally {
+    if (refreshInFlight === task) refreshInFlight = null;
+  }
+}
+
+async function runRefresh(force) {
+  const stored = await loadMarketWidthDb();
+  try {
+    const fresh = buildRows(parsePayload(await requestApi(fetchStart(stored))));
+    if (!hasData(fresh)) throw new Error('市场宽度数据为空');
+    await saveMarketWidthDb(fresh);
+    markRefreshed();
+    /* 写入后再读库，返回库内完整历史（含接口窗口之外的旧日期） */
+    const merged = await loadMarketWidthDb();
+    return hasData(merged) ? merged : fresh;
+  } catch (e) {
+    if (force) throw e;
+    return null;
+  }
+}
+
+/* 兼容阻塞式调用（启动补齐、无库数据等场景）：先读库，再按库内最大日期补数。
+   接口不可用时回落到库内数据；库内也无数据则抛出接口错误。 */
 export async function loadMarketWidth(force = false) {
   if (!force && dataCache.day === today() && dataCache.value) return dataCache.value;
 
   const stored = await loadMarketWidthDb();
-  let fresh = null;
-  try {
-    fresh = buildRows(parsePayload(await requestApi(fetchStart(stored))));
-    await saveMarketWidthDb(fresh);
-  } catch (e) {
-    if (hasData(stored)) {
-      dataCache = { day: today(), value: stored };
-      return stored;
-    }
-    throw e;
+  if (!force && refreshedRecently() && hasData(stored)) {
+    dataCache = { day: today(), value: stored };
+    return stored;
   }
 
-  // 写入后再读库，返回库内完整历史（含接口窗口之外的旧日期）
-  const merged = await loadMarketWidthDb();
-  const value = hasData(merged) ? merged : hasData(fresh) ? fresh : stored;
-  dataCache = { day: today(), value };
-  return value;
+  try {
+    const value = await refreshMarketWidth({ force: force || !hasData(stored) });
+    if (value) {
+      dataCache = { day: today(), value };
+      return value;
+    }
+  } catch (e) {
+    if (!hasData(stored)) throw e;
+  }
+
+  if (hasData(stored)) {
+    dataCache = { day: today(), value: stored };
+    return stored;
+  }
+  throw new Error('市场宽度数据不可用');
 }

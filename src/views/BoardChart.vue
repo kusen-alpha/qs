@@ -218,8 +218,8 @@ onMounted(async () => {
   else resetSelection();
 
   offs.push(
-    await on('stateChange', () => {
-      monitor.$hydrate({ runHooks: false });
+    await on('stateChange', async () => {
+      await monitor.loadFromDb();
       if (isSector.value) loadSector();
     }),
   );

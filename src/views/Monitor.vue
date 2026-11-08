@@ -198,7 +198,7 @@ onMounted(async () => {
   setTimeout(resizeWindow, 300);
 
   offs.push(
-    await on('settingChange', (e) => {
+    await on('settingChange', async (e) => {
       const keys = [
         'watchFieldsChange',
         'tableSizeChange',
@@ -210,7 +210,7 @@ onMounted(async () => {
         'isEdgeFoldChange',
       ];
       if (e.payload.some((k) => keys.includes(k))) {
-        setting.$hydrate({ runHooks: false });
+        await setting.loadFromDb();
         if (
           e.payload.includes('isFixWidthChange') ||
           e.payload.includes('fixedWidthChange') ||

@@ -10,7 +10,6 @@ function mountSetting() {
   freshPinia();
   const setting = useSettingStore();
   const cache = useCacheStore();
-  setting.$persist = () => {};
   setting.tableSize = 'small';
   setting.fixedWidth = 380;
   const wrapper = mount(Setting, {

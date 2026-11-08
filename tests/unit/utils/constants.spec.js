@@ -13,6 +13,7 @@ describe('constants · 常量契约', () => {
     expect(MonitorEvent).toEqual({
       addWatchList: 'addWatchList',
       deleteWatchList: 'deleteWatchList',
+      rollbackWatchList: 'rollbackWatchList',
     });
   });
 

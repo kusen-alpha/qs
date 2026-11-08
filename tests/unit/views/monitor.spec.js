@@ -10,7 +10,6 @@ function mountMonitor() {
   freshPinia();
   const monitor = useMonitorStore();
   const setting = useSettingStore();
-  setting.$persist = () => {};
   monitor.watchGroup = [
     { id: 0, id_str: '0', name: '自选', symbols: [{ symbol: '600519' }] },
     { id: 1, id_str: '1', name: '行业', symbols: [] },

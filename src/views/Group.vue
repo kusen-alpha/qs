@@ -58,12 +58,15 @@ import GroupItems from '../components/group/GroupItems.vue';
 import WindowMaxButton from '../components/WindowMaxButton.vue';
 import { useMonitorStore } from '../stores/monitor';
 import { useCacheStore } from '../stores/cache';
+import { useSymbolStore } from '../stores/symbol';
 import { MonitorEvent } from '../constants';
 import { isTauri } from '../utils/env';
 import { applyDragRegion } from '../utils/layout';
+import { emit } from '../utils/events';
 
 const monitor = useMonitorStore();
 const cache = useCacheStore();
+const symbol = useSymbolStore();
 
 function loadGroups() {
   const groups = JSON.parse(JSON.stringify(monitor.watchGroup));
@@ -76,6 +79,7 @@ function loadGroups() {
     }));
   }
   cache.group = groups;
+  cache.removedWatchSecids = [];
   if (!groups.find((g) => g.id == cache.selectGroup) && groups.length) {
     cache.selectGroup = groups[0].id;
   }
@@ -90,22 +94,39 @@ watch(
   },
 );
 
-function save() {
+async function save() {
+  const removedSecids = cache.removedWatchSecids.slice();
+  const snapshot = JSON.parse(JSON.stringify(monitor.watchGroup));
   try {
     monitor.watchGroup = cache.group;
-    monitor.persist(MonitorEvent.addWatchList);
-    ElMessage.success({
-      message: '保存成功',
-      type: 'success',
-      duration: 1200,
-    });
+    const result = await monitor.persist(MonitorEvent.addWatchList);
+    // 落库失败时不能提示成功，否则删除/新增只停留在前端
+    if (isTauri() && !result) throw new Error('数据库写入失败');
   } catch (e) {
+    // 回滚前端快照，其他窗口收到广播后从数据库重读恢复
+    monitor.watchGroup = snapshot;
+    // persist 内已按失败前的状态广播过一次，回滚后需再次广播让其他窗口同步恢复
+    emit('stateChange', MonitorEvent.rollbackWatchList);
     ElMessage.error({
       message: '保存失败: ' + e.message,
       type: 'error',
       duration: 2000,
     });
+    return;
   }
+  // 自选删除会彻底清除股票：落库成功后同步清理提醒/持仓配置（重新加回的不清）
+  const watchSecids = new Set(
+    ((cache.group.find((g) => Number(g.id) === 0) || {}).symbols || []).map((s) => s.secid),
+  );
+  for (const secid of removedSecids) {
+    if (!watchSecids.has(secid)) await symbol.deleteSymbolConfig(secid);
+  }
+  cache.removedWatchSecids = [];
+  ElMessage.success({
+    message: '保存成功',
+    type: 'success',
+    duration: 1200,
+  });
 }
 
 function closeWindow() {

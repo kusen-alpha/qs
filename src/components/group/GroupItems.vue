@@ -93,6 +93,7 @@ import GroupItemChangeDialog from './GroupItemChangeDialog.vue';
 import { WindowConfigs } from '../../utils/windows';
 import { on } from '../../utils/events';
 import { isTauri } from '../../utils/env';
+import { MonitorEvent } from '../../constants';
 
 const cache = useCacheStore();
 const monitor = useMonitorStore();
@@ -130,6 +131,16 @@ const isWatchGroup = computed(() => currentGroup.value.id == 0);
 const isSubConcept = computed(() => !!parentConcept.value);
 const showToolbar = computed(() => isWatchGroup.value || isSubConcept.value);
 
+/* 记录本次从自选移除的股票：保存成功后由分组页统一清理提醒/持仓配置 */
+function markWatchRemoved(symbols) {
+  if (!isWatchGroup.value) return;
+  for (const s of symbols) {
+    if (s.secid && !cache.removedWatchSecids.includes(s.secid)) {
+      cache.removedWatchSecids.push(s.secid);
+    }
+  }
+}
+
 function onSelectionChange(list) {
   selected.value = list;
 }
@@ -165,12 +176,14 @@ function clearSelection() {
 }
 
 function confirmDelete() {
+  markWatchRemoved(selected.value);
   cache.deleteSymbols(selected.value, currentGroup.value.id);
   clearSelection();
   dialogVisible.value = false;
 }
 
 function deleteOne(row) {
+  markWatchRemoved([row]);
   cache.deleteSymbols([row], currentGroup.value.id);
   clearSelection();
 }
@@ -193,18 +206,87 @@ async function openSearchWindow() {
   new WebviewWindow(cfg.label, cfg.window);
 }
 
+/* 其他窗口删除自选时被同步剪掉的概念归属：记录原概念与原位置，
+   落库失败回滚后按原样恢复；真正删除则在后续列表变更时丢弃 */
+const prunedBackup = new Map();
+
+/** 跨窗口事件载荷：Tauri 传事件对象，浏览器传载荷本身 */
+function payloadOf(event) {
+  if (event && typeof event === 'object' && 'payload' in event) return event.payload;
+  return event;
+}
+
+/** 从各概念移除股票，并记录被剪掉的归属（自选分组本身由同步逻辑自行恢复） */
+function backupAndPrune(removed) {
+  const prune = (groups) => {
+    for (const group of groups) {
+      if (Number(group.id) === 0) {
+        // 自选本身无需备份，回滚时会由自选快照重新合并回来
+        group.symbols = (group.symbols || []).filter((s) => !removed.has(s.secid));
+      } else {
+        const kept = [];
+        (group.symbols || []).forEach((s, index) => {
+          if (!removed.has(s.secid)) {
+            kept.push(s);
+            return;
+          }
+          const records = prunedBackup.get(s.secid) || [];
+          records.push({ groupId: group.id, index, symbol: s });
+          prunedBackup.set(s.secid, records);
+        });
+        group.symbols = kept;
+      }
+      prune(group.children || []);
+    }
+  };
+  prune(cache.group);
+}
+
+/** 回滚：把重新出现在自选里的股票放回原概念的原位置 */
+function restorePruned(latestIds) {
+  for (const [secid, records] of prunedBackup) {
+    if (!latestIds.has(secid)) continue;
+    records.sort((a, b) => a.index - b.index);
+    for (const record of records) {
+      const group = cache.findConceptById(record.groupId);
+      if (!group) continue;
+      if (!group.symbols) group.symbols = [];
+      if (group.symbols.some((s) => s.secid === secid)) continue;
+      group.symbols.splice(Math.min(record.index, group.symbols.length), 0, record.symbol);
+    }
+  }
+  prunedBackup.clear();
+}
+
+/** 自选里重新出现的股票属于合法重新添加：丢弃旧概念归属，不回填 */
+function dropPrunedBackup(latestIds) {
+  for (const secid of [...prunedBackup.keys()]) {
+    if (latestIds.has(secid)) prunedBackup.delete(secid);
+  }
+}
+
 /* 搜索窗口添加股票后，把自选的新股票同步到当前概念页（保留页面上未保存的编辑） */
-async function syncWatchSymbols() {
-  monitor.$hydrate({ runHooks: false });
+async function syncWatchSymbols(event) {
+  await monitor.loadFromDb();
   const watch = cache.group.find((group) => group.id === 0);
   const latest = monitor.watchGroup.find((group) => group.id === 0);
   if (!watch || !latest) return;
-  const exists = new Set((watch.symbols || []).map((s) => s.secid));
+  const pendingRemoved = new Set(cache.removedWatchSecids);
+  const localIds = new Set((watch.symbols || []).map((s) => s.secid));
+  const latestIds = new Set((latest.symbols || []).map((s) => s.secid));
+  // 删除落库失败的回滚：先按快照把概念归属放回；其它事件里重新出现的自选视为重新添加
+  if (payloadOf(event) === MonitorEvent.rollbackWatchList) restorePruned(latestIds);
+  else dropPrunedBackup(latestIds);
+  // 其他窗口新增的自选：合并进来（本窗口刚删除、尚未保存的不回填）
   for (const s of latest.symbols || []) {
-    if (exists.has(s.secid)) continue;
+    if (localIds.has(s.secid) || pendingRemoved.has(s.secid)) continue;
     watch.symbols.push({ ...s });
-    exists.add(s.secid);
+    localIds.add(s.secid);
   }
+  // 其他窗口删除的自选：删自选即彻底清除，同步从自选和所有概念移除
+  const removed = new Set([...localIds].filter((secid) => !latestIds.has(secid)));
+  if (!removed.size) return;
+  backupAndPrune(removed);
 }
 
 let offStateChange = null;

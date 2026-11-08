@@ -2,7 +2,7 @@ import { defineStore } from 'pinia';
 import { isEqual } from 'lodash-es';
 import { invoke } from '@tauri-apps/api/core';
 import { emit } from '../utils/events';
-import { writeData, Files } from '../utils/file';
+import { loadSettings, saveSettings } from '../utils/db';
 import { isTauri } from '../utils/env';
 import { SettingEvent, UpdownColor, defaultWatchFields } from '../constants';
 
@@ -13,7 +13,7 @@ async function setAutostart(enable) {
   );
 }
 
-/** 持久化设置 */
+/** 持久化设置：数据库是唯一来源 */
 export const useSettingStore = defineStore('setting', {
   state: () => ({
     tableSize: 'small',
@@ -28,7 +28,21 @@ export const useSettingStore = defineStore('setting', {
     shortcutBoss: ['Ctrl', 'Q'],
   }),
   actions: {
-    updateSettings(next) {
+    /** 从数据库回填；无记录时恢复默认值，并补齐新增字段的默认值 */
+    async loadFromDb() {
+      const data = await loadSettings();
+      this.$reset();
+      if (data && typeof data === 'object') {
+        Object.assign(this.$state, data);
+      }
+      const fields = this.watchFields || {};
+      for (const key in defaultWatchFields) {
+        if (fields[key] === undefined) fields[key] = defaultWatchFields[key];
+      }
+      this.watchFields = fields;
+      return true;
+    },
+    async updateSettings(next) {
       const changed = [];
       if (!isEqual(next.watchFields, this.watchFields)) {
         this.watchFields = next.watchFields;
@@ -71,20 +85,13 @@ export const useSettingStore = defineStore('setting', {
         changed.push(SettingEvent.shortcutBossChange);
       }
       if (changed.length > 0) {
-        this.$persist();
-        writeData(Files.SETTINGS.folder, Files.SETTINGS.file, JSON.parse(JSON.stringify(this.$state)));
+        const saved = await saveSettings(JSON.parse(JSON.stringify(this.$state)));
+        if (isTauri() && !saved) {
+          throw new Error('设置保存失败');
+        }
         emit('settingChange', changed);
       }
-    },
-  },
-  persist: {
-    storage: localStorage,
-    /* 老配置里没有新增字段时补上默认值，例如 MACD 列默认开启 */
-    afterRestore: (ctx) => {
-      const fields = ctx.store.watchFields || {};
-      for (const key in defaultWatchFields) {
-        if (fields[key] === undefined) fields[key] = defaultWatchFields[key];
-      }
+      return changed;
     },
   },
 });

@@ -17,7 +17,6 @@ function mountBar(tab = 'watch') {
   freshPinia();
   const cache = useCacheStore();
   const setting = useSettingStore();
-  setting.$persist = () => {};
   cache.totoal_profit = 12345;
   cache.totoal_profit_rate = 0.1234;
   cache.today_profit = -100;

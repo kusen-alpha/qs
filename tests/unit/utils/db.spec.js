@@ -4,14 +4,25 @@ import {
   configureDb,
   deleteCalendarEvent,
   getDbSetupState,
+  importLegacy,
   loadBoardK,
   loadBoardList,
   loadCalendarEvents,
   loadMarketWidthDb,
+  loadQuoteMarketStatus,
+  loadQuotes,
+  loadSettings,
+  loadSymbolConfigs,
+  pruneTodayHistory,
   refreshBoardHistory,
+  replaceHistoryRange,
   saveCalendarEvent,
   saveMarketWidthDb,
+  saveSettings,
   saveStockConcepts,
+  saveSymbolConfigs,
+  setNonTradingDay,
+  syncNonTradingDays,
   testDbConnection,
 } from '@/utils/db';
 
@@ -25,7 +36,7 @@ beforeEach(() => {
 });
 
 describe('buildWatchGroup · 数据库行还原为 watchGroup', () => {
-  it('数据库为空时返回空数组，调用方保留原数据', () => {
+  it('数据库为空时返回空数组，调用方补空自选组', () => {
     expect(buildWatchGroup({})).toEqual([]);
     expect(buildWatchGroup({ stocks: [], notions: [], members: [] })).toEqual([]);
   });
@@ -217,6 +228,112 @@ describe('日历事件 · 命令封装', () => {
   });
 });
 
+describe('非交易日日历 · 命令封装', () => {
+  it('浏览器环境不调用 IPC，返回 null', async () => {
+    expect(await syncNonTradingDays('2024-01-01', '2026-11-08')).toBeNull();
+    expect(await setNonTradingDay('2026-11-08', true)).toBeNull();
+    expect(state.invoke).not.toHaveBeenCalled();
+  });
+
+  it('桌面端回填时透传起止日期，缺参不触发 IPC', async () => {
+    state.tauri = true;
+    expect(await syncNonTradingDays('', '2026-11-08')).toBeNull();
+    expect(await syncNonTradingDays('2024-01-01', '')).toBeNull();
+    expect(state.invoke).not.toHaveBeenCalled();
+
+    state.invoke.mockResolvedValue({ added: 3, removed: 1 });
+    expect(await syncNonTradingDays('2024-01-01', '2026-11-08')).toEqual({
+      added: 3,
+      removed: 1,
+    });
+    expect(state.invoke).toHaveBeenCalledWith('db_sync_non_trading_days', {
+      start: '2024-01-01',
+      end: '2026-11-08',
+    });
+  });
+
+  it('桌面端标记/清除当天非交易日，source 默认 probe', async () => {
+    state.tauri = true;
+    state.invoke.mockResolvedValue({ ok: true });
+    expect(await setNonTradingDay('2026-11-08', true)).toEqual({ ok: true });
+    expect(state.invoke).toHaveBeenCalledWith('db_set_non_trading_day', {
+      date: '2026-11-08',
+      nonTrading: true,
+      source: 'probe',
+    });
+
+    state.invoke.mockClear();
+    await setNonTradingDay('2026-11-08', false, 'manual');
+    expect(state.invoke).toHaveBeenCalledWith('db_set_non_trading_day', {
+      date: '2026-11-08',
+      nonTrading: false,
+      source: 'manual',
+    });
+  });
+
+  it('日期缺失或命令失败时返回 null，不抛出', async () => {
+    state.tauri = true;
+    expect(await setNonTradingDay('', true)).toBeNull();
+    expect(state.invoke).not.toHaveBeenCalled();
+
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    state.invoke.mockRejectedValue(new Error('boom'));
+    expect(await syncNonTradingDays('2024-01-01', '2026-11-08')).toBeNull();
+    expect(errorSpy).toHaveBeenCalledWith('[db] 回填非交易日失败', expect.any(Error));
+    expect(await setNonTradingDay('2026-11-08', true)).toBeNull();
+    expect(errorSpy).toHaveBeenCalledWith('[db] 标记非交易日失败', expect.any(Error));
+    errorSpy.mockRestore();
+  });
+});
+
+describe('行情来源判定与库内快照 · 命令封装', () => {
+  it('浏览器环境不调用 IPC，返回 null 与空数组', async () => {
+    expect(await loadQuoteMarketStatus()).toBeNull();
+    expect(await loadQuotes(['1.600519'])).toEqual([]);
+    expect(state.invoke).not.toHaveBeenCalled();
+  });
+
+  it('桌面端读取时段判定与批量快照', async () => {
+    state.tauri = true;
+    state.invoke.mockResolvedValue({
+      today: '2026-11-09',
+      todayTrading: true,
+      liveWindow: false,
+      latestTradingDay: '2026-11-06',
+      syncedDate: '2026-11-06',
+      useDb: true,
+    });
+    expect(await loadQuoteMarketStatus()).toMatchObject({ useDb: true });
+    expect(state.invoke).toHaveBeenCalledWith('db_quote_market_status', { secids: [] });
+
+    state.invoke.mockClear().mockResolvedValue({ useDb: true, windowCovered: true });
+    await loadQuoteMarketStatus(['1.600519']);
+    expect(state.invoke).toHaveBeenCalledWith('db_quote_market_status', {
+      secids: ['1.600519'],
+    });
+
+    state.invoke.mockClear().mockResolvedValue([{ secid: '1.600519', price: 1500 }]);
+    expect(await loadQuotes(['1.600519'])).toEqual([{ secid: '1.600519', price: 1500 }]);
+    expect(state.invoke).toHaveBeenCalledWith('db_load_quotes', {
+      secids: ['1.600519'],
+    });
+  });
+
+  it('空 secids 不触发 IPC；命令失败只记录日志并返回空值', async () => {
+    state.tauri = true;
+    expect(await loadQuotes([])).toEqual([]);
+    expect(state.invoke).not.toHaveBeenCalled();
+
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    state.invoke.mockRejectedValue(new Error('boom'));
+    expect(await loadQuoteMarketStatus()).toBeNull();
+    expect(errorSpy).toHaveBeenCalledWith('[db] 读取行情时段失败', expect.any(Error));
+    expect(await loadQuotes(['1.600519'])).toEqual([]);
+    expect(errorSpy).toHaveBeenCalledWith('[db] 读取行情快照失败', expect.any(Error));
+    errorSpy.mockRestore();
+  });
+});
+
 describe('数据库初始化向导 · 命令封装', () => {
   it('浏览器环境视为已配置，不发 IPC', async () => {
     const setup = await getDbSetupState();
@@ -274,3 +391,131 @@ describe('板块历史刷新 · 命令封装', () => {
     errorSpy.mockRestore();
   });
 });
+
+describe('replaceHistoryRange · 区间替换K线', () => {
+  const candles = [{ date: '2026-11-03', open: 10, close: 10.5 }];
+
+  it('浏览器环境直接返回 null，不调用命令', async () => {
+    expect(await replaceHistoryRange('1.600519', '2026-11-01', '2026-11-03', candles)).toBeNull();
+    expect(state.invoke).not.toHaveBeenCalled();
+  });
+
+  it('桌面端按区间删除后写入，参数透传', async () => {
+    state.tauri = true;
+    state.invoke.mockResolvedValue({ removed: 2, saved: 1 });
+    expect(await replaceHistoryRange('1.600519', '2026-11-01', '2026-11-03', candles)).toEqual({
+      removed: 2,
+      saved: 1,
+    });
+    expect(state.invoke).toHaveBeenCalledWith('db_replace_history_range', {
+      secid: '1.600519',
+      beg: '2026-11-01',
+      end: '2026-11-03',
+      candles: JSON.stringify(candles),
+    });
+  });
+
+  it('参数缺失时不调用命令', async () => {
+    state.tauri = true;
+    expect(await replaceHistoryRange('', '2026-11-01', '2026-11-03', candles)).toBeNull();
+    expect(await replaceHistoryRange('1.600519', '', '2026-11-03', candles)).toBeNull();
+    expect(state.invoke).not.toHaveBeenCalled();
+  });
+});
+
+describe('pruneTodayHistory · 清理当天残留K线', () => {
+  it('浏览器环境直接返回 null，不调用命令', async () => {
+    expect(await pruneTodayHistory('2026-11-03')).toBeNull();
+    expect(state.invoke).not.toHaveBeenCalled();
+  });
+
+  it('桌面端返回删除行数', async () => {
+    state.tauri = true;
+    state.invoke.mockResolvedValue({ removed: 3 });
+    expect(await pruneTodayHistory('2026-11-03')).toBe(3);
+    expect(state.invoke).toHaveBeenCalledWith('db_prune_today_history', { date: '2026-11-03' });
+  });
+
+  it('日期缺失或命令失败时返回 null', async () => {
+    state.tauri = true;
+    expect(await pruneTodayHistory('')).toBeNull();
+    expect(state.invoke).not.toHaveBeenCalled();
+
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    state.invoke.mockRejectedValue(new Error('boom'));
+    expect(await pruneTodayHistory('2026-11-03')).toBeNull();
+    expect(errorSpy).toHaveBeenCalledWith('[db] 清理当天K线失败', expect.any(Error));
+    errorSpy.mockRestore();
+  });
+});
+
+describe('设置与持仓配置 · 数据库命令封装', () => {
+  it('浏览器环境返回空值且不发 IPC', async () => {
+    expect(await loadSettings()).toBeNull();
+    expect(await saveSettings({})).toBeNull();
+    expect(await loadSymbolConfigs()).toEqual({});
+    expect(await saveSymbolConfigs({})).toBeNull();
+    expect(await importLegacy({})).toBeNull();
+    expect(state.invoke).not.toHaveBeenCalled();
+  });
+
+  it('桌面端读取设置与持仓配置', async () => {
+    state.tauri = true;
+    state.invoke.mockResolvedValueOnce({ settings: { tableSize: 'small' } });
+    expect(await loadSettings()).toEqual({ tableSize: 'small' });
+    expect(state.invoke).toHaveBeenCalledWith('db_load_settings');
+
+    state.invoke.mockReset().mockResolvedValueOnce({
+      configs: { '1.600519': { secid: '1.600519' } },
+    });
+    expect(await loadSymbolConfigs()).toEqual({ '1.600519': { secid: '1.600519' } });
+    expect(state.invoke).toHaveBeenCalledWith('db_load_symbol_configs');
+  });
+
+  it('桌面端保存设置与持仓配置透传 payload', async () => {
+    state.tauri = true;
+    state.invoke.mockResolvedValueOnce({ saved: true });
+    expect(await saveSettings({ tableSize: 'small' })).toEqual({ saved: true });
+    expect(state.invoke).toHaveBeenCalledWith('db_save_settings', {
+      payload: JSON.stringify({ tableSize: 'small' }),
+    });
+
+    state.invoke.mockReset().mockResolvedValueOnce({ saved: true });
+    const configs = { '1.600519': { secid: '1.600519' } };
+    expect(await saveSymbolConfigs(configs)).toEqual({ saved: true });
+    expect(state.invoke).toHaveBeenCalledWith('db_save_symbol_configs', {
+      payload: JSON.stringify(configs),
+    });
+  });
+
+  it('旧版数据导入按约定结构透传', async () => {
+    state.tauri = true;
+    state.invoke.mockResolvedValueOnce({ imported: true });
+    const payload = {
+      settings: { tableSize: 'small' },
+      symbolConfigs: { '1.600519': { secid: '1.600519' } },
+      groups: [{ id: 0, name: '自选', symbols: [] }],
+    };
+    expect(await importLegacy(payload)).toEqual({ imported: true });
+    expect(state.invoke).toHaveBeenCalledWith('db_import_legacy', {
+      payload: JSON.stringify({
+        settings: payload.settings,
+        symbol_configs: payload.symbolConfigs,
+        groups: payload.groups,
+      }),
+    });
+  });
+
+  it('读写失败时返回空值或 null，不抛出', async () => {
+    state.tauri = true;
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    state.invoke.mockRejectedValue(new Error('boom'));
+    expect(await loadSettings()).toBeNull();
+    expect(await saveSettings({})).toBeNull();
+    expect(await loadSymbolConfigs()).toEqual({});
+    expect(await saveSymbolConfigs({})).toBeNull();
+    expect(await importLegacy({})).toBeNull();
+    errorSpy.mockRestore();
+  });
+});
+

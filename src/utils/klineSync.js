@@ -1,4 +1,11 @@
-import { loadHistory, loadHistoryTargets, replaceHistory, saveHistory } from './db';
+import {
+  loadHistory,
+  loadHistoryTargets,
+  pruneTodayHistory,
+  replaceHistory,
+  replaceHistoryRange,
+  saveHistory,
+} from './db';
 import { fetchKlineRange, MIN_BEG } from './kline';
 
 /**
@@ -147,9 +154,9 @@ export async function resolveBaselineTradingDate(now = new Date(), delay = REQUE
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-/** 新增字段（volume / ratio / turnover_ratio）是否尚未回填：最新一根缺任一字段即视为待回填 */
-export function needsFieldBackfill(lastDate, latestTurnover, latestVolume) {
-  return Boolean(lastDate) && (latestTurnover == null || latestVolume == null);
+/** 新增字段（volume / ratio / turnover_ratio）是否尚未回填：存在任一行缺字段即视为待回填 */
+export function needsFieldBackfill(lastDate, missingFields) {
+  return Boolean(lastDate) && Number(missingFields || 0) > 0;
 }
 
 /** 全量重拉并覆盖（复权基准变动、首次入库、字段回填共用） */
@@ -164,9 +171,10 @@ async function reloadAll(secid, baseline, summary) {
     summary.skipped += 1;
     return;
   }
-  // 数据源可能被截断成只有近期窗口，直接覆盖会丢掉更早历史，此时改为合并写入
+  // 数据源可能被截断成只有近期窗口，直接覆盖会丢掉更早历史，此时改为区间合并写入：
+  // 先清空 [最早, 基准] 区间，避免源端已不存在的日期留在库里
   if (all[0].date <= FULL_COVER_ISO) await replaceHistory(secid, all);
-  else await saveHistory(secid, all);
+  else await replaceHistoryRange(secid, all[0].date, baseline, all);
   summary.reloaded += 1;
 }
 
@@ -175,7 +183,7 @@ async function syncOne(target, baseline, summary) {
   const lastDate = target.last_date || '';
 
   // 库里没有该股历史，或 volume / ratio / turnover_ratio 尚未回填：全量拉取
-  if (!lastDate || needsFieldBackfill(lastDate, target.latest_turnover, target.latest_volume)) {
+  if (!lastDate || needsFieldBackfill(lastDate, target.missing_fields)) {
     await reloadAll(secid, baseline, summary);
     return;
   }
@@ -236,6 +244,12 @@ export async function reloadHistories(secids = [], { delay = REQUEST_GAP_MS, now
 
 /** 逐只串行补齐，返回统计 */
 export async function syncWatchHistory({ delay = REQUEST_GAP_MS, now = new Date() } = {}) {
+  // 15:15 前当天K线必然不完整：先清掉上次运行残留的当日行（否则 last_date=今天 会被跳过）
+  if (!isTodaySettled(now)) {
+    const todayIso = formatIso(now);
+    await pruneTodayHistory(todayIso);
+  }
+
   const targets = await loadHistoryTargets();
   const summary = { checked: 0, skipped: 0, filled: 0, reloaded: 0, failed: 0 };
   if (!targets.length) return summary;

@@ -254,6 +254,19 @@ describe('Setup · 启动数据库配置向导', () => {
     expect(wrapper.find('.setup-feedback.error').text()).toBe('建库失败');
   });
 
+  it('初始化 store 失败时清除加载状态、提示原因且不进入主界面', async () => {
+    mocks.configureDb.mockResolvedValue({ ok: true, message: '已初始化' });
+    mocks.initStores.mockRejectedValue(new Error('数据库读取失败'));
+    const wrapper = await mountReady();
+    await wrapper.findAll('.setup-actions button')[1].trigger('click');
+    await flushPromises();
+
+    expect(wrapper.findAll('.setup-actions button')[1].classes()).not.toContain('is-loading');
+    expect(wrapper.find('.setup-feedback.error').text()).toContain('初始化失败');
+    expect(wrapper.find('.setup-feedback.error').text()).toContain('数据库读取失败');
+    expect(mocks.replace).not.toHaveBeenCalled();
+  });
+
   it('启动连接失败时展示警告条', async () => {
     mocks.state.error = 'MySQL 连接超时';
     const wrapper = await mountReady();

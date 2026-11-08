@@ -1,10 +1,10 @@
 import { appDataDir, join } from '@tauri-apps/api/path';
-import { exists } from '@tauri-apps/plugin-fs';
+import { exists, remove } from '@tauri-apps/plugin-fs';
 import { isTauri } from './env';
 import { TauriStore } from './tauriStore';
 import { Ix } from './crypto';
 
-/** 数据文件清单，与原产物 `Ct` 常量完全一致 */
+/** 旧版数据文件清单，仅用于一次性迁移，迁移完成后删除 */
 export const Files = {
   SETTINGS: { folder: '', file: 'settings.json', encrpt: false },
   MONITOR: { folder: '', file: 'monitor.dat', encrpt: true },
@@ -13,7 +13,7 @@ export const Files = {
 
 let profileId = '';
 
-/** 切换当前数据库对应的配置目录；空值表示旧版公共目录 */
+/** 当前数据库对应的旧版配置目录；空值表示旧版公共目录 */
 export function setProfileId(id) {
   profileId = String(id || '').trim();
 }
@@ -30,59 +30,62 @@ async function baseDir() {
   return profileId ? join(base, 'profiles', profileId) : base;
 }
 
-/** 旧版公共目录下的同名文件，用于首次切到分库目录时迁移设置 */
-async function legacyFilePath(folder, file) {
-  return join(await appDataDir(), folder, file);
-}
-
-async function copyStore(from, to) {
-  const source = new TauriStore(from);
-  const target = new TauriStore(to);
-  for (const key of await source.keys()) {
-    await target.set(key, await source.get(key));
-  }
-  await target.save();
-}
-
 async function filePath(folder, file) {
   const base = await baseDir();
   if (!isTauri()) return [base, folder, file].filter(Boolean).join('/');
   return join(base, folder, file);
 }
 
-/** 首次创建数据文件，写入 create 时间戳 */
-export async function ensureFile(folder, file) {
-  const path = await filePath(folder, file);
-  if (isTauri()) {
-    if (await exists(path)) return false;
-    // 分库目录首次创建时，沿用旧版公共文件里的设置与缓存
-    if (profileId) {
-      const legacy = await legacyFilePath(folder, file);
-      if (await exists(legacy)) {
-        await copyStore(legacy, path);
-        return false;
-      }
-    }
-  } else {
-    const store = new TauriStore(path);
-    if (await store.has('create')) return false;
-  }
-  const store = new TauriStore(path);
-  await store.set('create', Date.now());
-  await store.save();
-  return true;
+/**
+ * 旧版文件可能落在两个位置：分库目录 profiles/<id>/ 与旧版公共根目录。
+ * 迁移时两处都检查，避免切换数据库后只读到其中一份。
+ */
+async function legacyPaths(file) {
+  if (!isTauri()) return [];
+  const base = await appDataDir();
+  const paths = [];
+  if (profileId) paths.push(await join(base, 'profiles', profileId, file));
+  paths.push(await join(base, file));
+  return paths;
 }
 
-/** 写数据文件；encrypt=true 时经 Ix 加密 */
-export async function writeData(folder, file, obj, encrypt = false) {
-  const path = await filePath(folder, file);
-  const store = new TauriStore(path);
-  if (encrypt) {
-    await store.set('data', new Ix().encrypt(JSON.stringify(obj)));
-  } else {
-    await store.set('data', obj);
+/** 旧版文件是否仍存在（任一处存在即 true） */
+export async function legacyExists(file) {
+  if (!isTauri()) return false;
+  for (const path of await legacyPaths(file)) {
+    if (await exists(path)) return true;
   }
-  await store.save();
+  return false;
+}
+
+/** 依次读取分库目录与旧版公共目录，返回第一个有效数据 */
+export async function readLegacyData(file, encrypt = false) {
+  for (const path of await legacyPaths(file)) {
+    if (!(await exists(path))) continue;
+    const store = new TauriStore(path);
+    const data = await store.get('data');
+    if (data === undefined || data === null) continue;
+    if (encrypt) {
+      const plain = new Ix().decrypt(data);
+      return JSON.parse(plain);
+    }
+    return data;
+  }
+  return null;
+}
+
+/** 删除两处目录下的全部旧版数据文件；单文件失败不阻断其它文件 */
+export async function removeLegacyFiles() {
+  if (!isTauri()) return;
+  for (const item of Object.values(Files)) {
+    for (const path of await legacyPaths(item.file)) {
+      try {
+        if (await exists(path)) await remove(path);
+      } catch (e) {
+        console.error('[file] 删除旧版数据文件失败', path, e);
+      }
+    }
+  }
 }
 
 /** 读数据文件；encrypt=true 时解密并 JSON.parse */

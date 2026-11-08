@@ -200,9 +200,26 @@ async function save() {
 }
 
 function remove(item) {
-  ElMessageBox.confirm(`确认删除事件「${item.name}」？`, '确认删除', { type: 'warning' })
+  // 重复事件的记录即系列定义，删除后会移除整条系列
+  const repeatTip =
+    item.repeat_type === 'monthly' || item.repeat_type === 'yearly'
+      ? '该事件为重复事件，删除后将移除整条系列。'
+      : '';
+  ElMessageBox.confirm(
+    `确认删除事件「${item.name}」？${repeatTip}`,
+    '确认删除',
+    { type: 'warning' },
+  )
     .then(async () => {
-      await deleteCalendarEvent(item.id);
+      const removed = await deleteCalendarEvent(item.id);
+      // 事件可能已被自动清理或写入失败，此时列表不会变化，需要明确提示
+      if (isTauri() && !removed) {
+        ElMessage.error({
+          message: '删除失败，请重试',
+          type: 'error',
+          duration: 2000,
+        });
+      }
       if (editingId.value === item.id) reset();
       await loadEvents();
       emit('calendarChanged');

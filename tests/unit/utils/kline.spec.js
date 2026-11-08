@@ -1,4 +1,14 @@
 import { describe, expect, it, vi } from 'vitest';
+
+const dbMock = vi.hoisted(() => ({
+  saveHistory: vi.fn(async () => null),
+  loadHistory: vi.fn(async () => []),
+}));
+vi.mock('@/utils/db', () => ({
+  saveHistory: dbMock.saveHistory,
+  loadHistory: dbMock.loadHistory,
+}));
+
 import {
   buildKlineUrl,
   fallbackKline,
@@ -278,5 +288,51 @@ describe('kline 工具', () => {
     // 已覆盖起点，不应再补拉 2024 年分段
     const chunks2024 = urls.filter((url) => decodeURIComponent(url).includes('sh600519,day,2024-01-01'));
     expect(chunks2024.length).toBe(1);
+  });
+
+  /* 腾讯兜底口径的行情返回：不依赖东财链路是否已在其他用例中被置为不可用 */
+  const intradayRows = [
+    ['2026-11-03', '10.00', '10.50', '10.60', '9.90', '100.00', {}, '0.50', '100.00', ''],
+    ['2026-11-04', '10.50', '10.80', '10.90', '10.40', '80.00', {}, '0.30', '90.00', ''],
+  ];
+  const stubKlineSource = () =>
+    vi.stubGlobal('fetch', async () => ({
+      ok: true,
+      text: async () => JSON.stringify({ data: { sh600519: { qfqday: intradayRows } } }),
+    }));
+
+  it('盘中（15:15 前）不把未完成的当日K线写库', async () => {
+    vi.useFakeTimers();
+    // 2026-11-04 是周三
+    vi.setSystemTime(new Date(2026, 10, 4, 10, 0));
+    dbMock.saveHistory.mockClear();
+    stubKlineSource();
+    const res = await fetchKline('1.600519');
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+
+    // 图表仍用接口返回的未完成当日K线渲染
+    expect(res.candles.map((candle) => candle.date)).toEqual(['2026-11-03', '2026-11-04']);
+    // 但落库必须剔除当天未完成的那根，避免污染 histories / 板块 / MACD
+    expect(dbMock.saveHistory).toHaveBeenCalledTimes(1);
+    expect(dbMock.saveHistory.mock.calls[0][1].map((candle) => candle.date)).toEqual([
+      '2026-11-03',
+    ]);
+  });
+
+  it('15:15 后当天K线视为完成并写库', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(2026, 10, 4, 15, 30));
+    dbMock.saveHistory.mockClear();
+    stubKlineSource();
+    const res = await fetchKline('1.600519');
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+
+    expect(res.candles).toHaveLength(2);
+    expect(dbMock.saveHistory.mock.calls[0][1].map((candle) => candle.date)).toEqual([
+      '2026-11-03',
+      '2026-11-04',
+    ]);
   });
 });

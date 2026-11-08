@@ -25,8 +25,9 @@
           <div class="mw-track">
             <div v-for="row in rows" :key="row.code" class="mw-row">
               <div class="mw-name">{{ row.name }}</div>
+              <div v-if="viewStart > 0" class="mw-gap" :style="{ width: `${viewStart * CELL_W}px` }"></div>
               <div
-                v-for="col in columns"
+                v-for="col in visibleColumns"
                 :key="col.date"
                 class="mw-cell"
                 :style="
@@ -37,6 +38,11 @@
               >
                 {{ row.values[col.index] === null ? '-' : row.values[col.index] }}
               </div>
+              <div
+                v-if="viewEnd < columns.length"
+                class="mw-gap"
+                :style="{ width: `${(columns.length - viewEnd) * CELL_W}px` }"
+              ></div>
             </div>
           </div>
         </div>
@@ -58,10 +64,22 @@
 </template>
 
 <script setup>
-import { nextTick, onMounted, onUnmounted, ref } from 'vue';
-import { loadMarketWidth } from '../api/legulegu';
+import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue';
+import {
+  loadMarketWidth,
+  loadMarketWidthFromDb,
+  refreshMarketWidth,
+} from '../api/legulegu';
 import WindowMaxButton from '../components/WindowMaxButton.vue';
 import { isTauri } from '../utils/env';
+
+/* 单列宽度与行业列宽度，需与样式保持一致，列虚拟化依赖这两个常量 */
+const CELL_W = 24;
+const NAME_W = 92;
+/* 可视区域左右各多渲染几列，滚动时不出现空白 */
+const OVERSCAN = 6;
+/* 默认开窗按 30 个交易日估算，与 fitWindowSize 中的 VISIBLE_DAYS 保持一致 */
+const VISIBLE_DAYS = 30;
 
 const loading = ref(false);
 const rows = ref([]);
@@ -69,6 +87,12 @@ const columns = ref([]);
 const error = ref('');
 const tableRef = ref(null);
 const scrollLeft = ref(0);
+/* 当前实际渲染的列区间 [viewStart, viewEnd)，避免一次性创建 32×688 个单元格 */
+const viewStart = ref(0);
+const viewEnd = ref(0);
+const visibleColumns = computed(() =>
+  columns.value.slice(viewStart.value, viewEnd.value),
+);
 
 /* 背景色渐变：0-50 深绿→浅绿，50-100 浅红→深红 */
 const GREEN_DEEP = [6, 86, 42];
@@ -91,10 +115,31 @@ function cellStyle(value) {
   return { backgroundColor: background, color: luminance > 0.62 ? '#303133' : '#ffffff' };
 }
 
+/* 可视列区间随横向滚动更新，只渲染窗口附近的列 */
+function syncVisible() {
+  const total = columns.value.length;
+  if (!total) {
+    viewStart.value = 0;
+    viewEnd.value = 0;
+    return;
+  }
+  const el = tableRef.value;
+  /* jsdom 等环境拿不到布局宽度时按窗口宽度估算 */
+  const containerWidth = (el && el.clientWidth) || window.innerWidth - NAME_W;
+  const viewWidth = Math.max(CELL_W, containerWidth - NAME_W);
+  const scroll = (el && el.scrollLeft) || 0;
+  const start = Math.max(0, Math.floor(scroll / CELL_W) - OVERSCAN);
+  const end = Math.min(total, Math.ceil((scroll + viewWidth) / CELL_W) + OVERSCAN);
+  viewStart.value = start;
+  viewEnd.value = Math.max(start + 1, end);
+}
+
 /* 表体外日期行跟随横向滚动，保证日期始终对准所在列 */
 function onScroll() {
   const el = tableRef.value;
-  if (el) scrollLeft.value = el.scrollLeft;
+  if (!el) return;
+  scrollLeft.value = el.scrollLeft;
+  syncVisible();
 }
 
 let retryTimer = null;
@@ -108,9 +153,13 @@ async function scrollToLatest(retry = 6) {
     if (retry > 0) retryTimer = setTimeout(() => scrollToLatest(retry - 1), 60);
     return;
   }
-  if (el.scrollWidth <= el.clientWidth) return;
-  el.scrollLeft = el.scrollWidth;
+  if (el.scrollWidth <= el.clientWidth) {
+    syncVisible();
+    return;
+  }
+  el.scrollLeft = Math.max(0, el.scrollWidth - el.clientWidth);
   scrollLeft.value = el.scrollLeft;
+  syncVisible();
 }
 
 /* 按行业行数与列宽动态调整窗口尺寸：高度容纳全部行业，宽度贴近表格右缘 */
@@ -133,8 +182,7 @@ async function fitWindowSize() {
       2,
   );
   const rect = table.getBoundingClientRect();
-  /* 默认宽度按 30 个交易日开窗，历史列更多时由横向滚动条查看，避免窗口过宽 */
-  const VISIBLE_DAYS = 30;
+  /* 默认宽度按 VISIBLE_DAYS 个交易日开窗，历史列更多时由横向滚动条查看，避免窗口过宽 */
   const visibleDays = Math.min(columns.value.length, VISIBLE_DAYS);
   const gridWidth = 92 + visibleDays * 24;
   const rightInset = window.innerWidth - rect.right;
@@ -156,30 +204,85 @@ async function fitWindowSize() {
 
 onUnmounted(() => {
   if (retryTimer) clearTimeout(retryTimer);
+  window.removeEventListener('resize', syncVisible);
 });
+
+/* 应用一份完整数据：行业平均固定到第一行，日期按升序成列 */
+function applyData(data) {
+  const average = data.rows.filter((row) => row.name === '行业平均');
+  rows.value = [...average, ...data.rows.filter((row) => row.name !== '行业平均')];
+  columns.value = data.dates.map((date, index) => ({ date, index }));
+  if (!tableRef.value) {
+    /* 首次渲染直接从最右侧（最新交易日）开始铺列，其余历史列在拖入视窗时按需渲染 */
+    const initial = Math.min(columns.value.length, VISIBLE_DAYS + OVERSCAN);
+    viewEnd.value = columns.value.length;
+    viewStart.value = columns.value.length - initial;
+  } else {
+    viewEnd.value = Math.min(viewEnd.value, columns.value.length);
+    viewStart.value = Math.min(viewStart.value, Math.max(0, columns.value.length - 1));
+  }
+}
+
+/* 库内数据已渲染时，后台按库内最大交易日补数并落库，成功后再合并回表格 */
+async function refreshInBackground() {
+  try {
+    const fresh = await refreshMarketWidth();
+    if (!fresh) return;
+    const el = tableRef.value;
+    /* 用户正停在最新交易日时才跟随滚到最右，否则保持当前横向位置 */
+    const atLatest = !el || el.scrollWidth - el.clientWidth - el.scrollLeft <= 4;
+    applyData(fresh);
+    await nextTick();
+    syncVisible();
+    if (atLatest) await scrollToLatest();
+  } catch (e) {
+    /* 后台刷新失败静默，保留已渲染的库内数据 */
+  }
+}
 
 async function load() {
   loading.value = true;
   error.value = '';
+
+  /* 先读库立即渲染，窗口不必等接口 */
+  let painted = false;
   try {
-    const data = await loadMarketWidth();
-    /* 行业平均固定到第一行，其余保持接口顺序 */
-    const average = data.rows.filter((row) => row.name === '行业平均');
-    rows.value = [...average, ...data.rows.filter((row) => row.name !== '行业平均')];
-    /* 接口按日期升序返回，最右侧为最新交易日 */
-    columns.value = data.dates.map((date, index) => ({ date, index }));
+    const stored = await loadMarketWidthFromDb();
+    if (stored) {
+      applyData(stored);
+      painted = true;
+      loading.value = false;
+      await nextTick();
+      /* 初次渲染范围已在最右侧，先把视口定位到最新交易日，再调整窗口尺寸并校正 */
+      await scrollToLatest();
+      await fitWindowSize();
+      await scrollToLatest();
+      refreshInBackground();
+    }
+  } catch (e) {
+    /* 读库失败时退回阻塞加载 */
+  }
+  if (painted) return;
+
+  try {
+    applyData(await loadMarketWidth());
   } catch (e) {
     rows.value = [];
     error.value = e.message || '市场宽度数据获取失败';
   } finally {
     loading.value = false;
-    /* 先按屏幕宽度定窗口大小，再滚到最右侧，避免尺寸变化后定位偏移 */
+    await nextTick();
+    /* 同样先从最新交易日开始展示，窗口尺寸调整后再校正一次 */
+    if (rows.value.length) await scrollToLatest();
     await fitWindowSize();
     if (rows.value.length) await scrollToLatest();
   }
 }
 
-onMounted(load);
+onMounted(() => {
+  window.addEventListener('resize', syncVisible);
+  load();
+});
 
 async function close() {
   if (!isTauri()) return;
@@ -309,6 +412,11 @@ async function close() {
   font-size: 10px;
   line-height: 1;
   user-select: none;
+}
+/* 虚拟化占位：未渲染的列用空白撑开宽度，保证滚动条长度与日期对齐 */
+.mw-gap {
+  flex: 0 0 auto;
+  height: 24px;
 }
 .mw-empty {
   margin: 0;

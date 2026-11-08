@@ -3,7 +3,9 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('@/utils/db', () => ({
   loadHistory: vi.fn(),
   loadHistoryTargets: vi.fn(),
+  pruneTodayHistory: vi.fn(),
   replaceHistory: vi.fn(),
+  replaceHistoryRange: vi.fn(),
   saveHistory: vi.fn(),
 }));
 vi.mock('@/utils/kline', () => ({ MIN_BEG: 20240101, fetchKlineRange: vi.fn() }));
@@ -126,19 +128,19 @@ describe('klineSync · 重叠比对', () => {
 });
 
 describe('klineSync · 字段回填判定', () => {
-  it('最新一根缺换手率或成交量需要回填', () => {
-    expect(needsFieldBackfill('2026-10-30', null, 120000)).toBe(true);
-    expect(needsFieldBackfill('2026-10-30', 3.4, null)).toBe(true);
+  it('存在任意缺字段的行就需要回填', () => {
+    expect(needsFieldBackfill('2026-10-30', 3)).toBe(true);
+    expect(needsFieldBackfill('2026-10-30', 1)).toBe(true);
   });
 
-  it('最新一根字段齐全视为已回填', () => {
-    expect(needsFieldBackfill('2026-10-30', 3.4, 120000)).toBe(false);
-    // 换手率/成交量为 0（停牌、无成交）也算已有值
-    expect(needsFieldBackfill('2026-10-30', 0, 0)).toBe(false);
+  it('所有行字段齐全视为已回填', () => {
+    expect(needsFieldBackfill('2026-10-30', 0)).toBe(false);
+    expect(needsFieldBackfill('2026-10-30', null)).toBe(false);
   });
 
   it('库里没有历史时交给首次入库分支', () => {
-    expect(needsFieldBackfill('', null, null)).toBe(false);
+    expect(needsFieldBackfill('', 5)).toBe(false);
+    expect(needsFieldBackfill('', 0)).toBe(false);
   });
 });
 
@@ -150,7 +152,7 @@ describe('klineSync · 全量重拉', () => {
     db.loadHistoryTargets.mockResolvedValue([{ secid: '1.600519', last_date: '' }]);
   });
 
-  it('行情源截断成近期窗口时合并写入，不删除已有历史', async () => {
+  it('行情源截断成近期窗口时区间合并写入，清理源端已不存在的日期', async () => {
     kline.fetchKlineRange.mockImplementation(async (secid, beg) => {
       if (beg === 20240101) {
         return { candles: [{ date: '2025-09-29' }, { date: '2026-11-03' }] };
@@ -162,7 +164,7 @@ describe('klineSync · 全量重拉', () => {
 
     expect(summary.reloaded).toBe(1);
     expect(db.replaceHistory).not.toHaveBeenCalled();
-    expect(db.saveHistory).toHaveBeenCalledWith('1.600519', [
+    expect(db.replaceHistoryRange).toHaveBeenCalledWith('1.600519', '2025-09-29', '2026-11-03', [
       { date: '2025-09-29' },
       { date: '2026-11-03' },
     ]);
@@ -177,6 +179,52 @@ describe('klineSync · 全量重拉', () => {
     await syncWatchHistory({ now, delay: 0 });
 
     expect(db.replaceHistory).toHaveBeenCalledWith('1.600519', candles);
+    expect(db.replaceHistoryRange).not.toHaveBeenCalled();
     expect(db.saveHistory).not.toHaveBeenCalled();
+  });
+
+  it('库里存在缺失字段的行时触发全量回填（不只看最新一行）', async () => {
+    db.loadHistoryTargets.mockResolvedValue([
+      { secid: '1.600519', last_date: '2026-11-03', missing_fields: 2 },
+    ]);
+    kline.fetchKlineRange.mockResolvedValue({
+      candles: [{ date: '2026-11-03' }],
+    });
+
+    const summary = await syncWatchHistory({ now, delay: 0 });
+
+    expect(summary.reloaded).toBe(1);
+    expect(db.replaceHistoryRange).toHaveBeenCalledWith('1.600519', '2026-11-03', '2026-11-03', [
+      { date: '2026-11-03' },
+    ]);
+  });
+});
+
+describe('klineSync · 未收盘清理当天残留', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    db.loadHistoryTargets.mockResolvedValue([]);
+  });
+
+  it('15:15 前先清理当天遗留K线，再读取补齐目标', async () => {
+    const order = [];
+    db.pruneTodayHistory.mockImplementation(async (date) => {
+      order.push(`prune:${date}`);
+      return 0;
+    });
+    db.loadHistoryTargets.mockImplementation(async () => {
+      order.push('targets');
+      return [];
+    });
+
+    await syncWatchHistory({ now: new Date(2026, 10, 3, 10, 0), delay: 0 });
+
+    expect(order).toEqual(['prune:2026-11-03', 'targets']);
+  });
+
+  it('15:15 后当天K线已完整，不做清理', async () => {
+    await syncWatchHistory({ now: new Date(2026, 10, 3, 15, 30), delay: 0 });
+
+    expect(db.pruneTodayHistory).not.toHaveBeenCalled();
   });
 });

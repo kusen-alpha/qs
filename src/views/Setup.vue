@@ -194,19 +194,23 @@ async function onSave() {
   if (!validate()) return;
   saving.value = true;
   clearFeedback();
-  const payload = buildPayload();
-  const result = await configureDb(payload);
-  if (!result?.ok) {
+  try {
+    const payload = buildPayload();
+    const result = await configureDb(payload);
+    if (!result?.ok) {
+      setFeedback(false, result?.message || '配置失败');
+      return;
+    }
+    // 切换到该数据库对应的配置目录，再载入它自己的设置与缓存
+    setProfileId(profileKey(payload));
+    markConfigured();
+    await initStores();
+    router.replace('/');
+  } catch (e) {
+    setFeedback(false, `初始化失败：${e?.message || e}`);
+  } finally {
     saving.value = false;
-    setFeedback(false, result?.message || '配置失败');
-    return;
   }
-  // 切换到该数据库对应的配置目录，再载入它自己的设置与缓存
-  setProfileId(profileKey(payload));
-  markConfigured();
-  await initStores();
-  saving.value = false;
-  router.replace('/');
 }
 
 /** 目录与文件名拼接（Windows 目录用反斜杠，其余用正斜杠） */

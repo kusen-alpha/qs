@@ -3,6 +3,8 @@ import {
   buildRows,
   ensureMarketWidthHistory,
   loadMarketWidth,
+  loadMarketWidthFromDb,
+  refreshMarketWidth,
   requestHeaders,
   tokenOf,
   today,
@@ -14,6 +16,8 @@ const state = vi.hoisted(() => ({
   response: null,
   error: null,
   url: '',
+  calls: 0,
+  hang: false,
 }));
 
 vi.mock('@/utils/db', () => ({
@@ -25,10 +29,19 @@ vi.mock('@/utils/db', () => ({
 }));
 
 vi.mock('@/utils/http', () => ({
-  request: vi.fn(async (url) => {
+  request: vi.fn((url, options = {}) => {
     state.url = url;
-    if (state.error) throw state.error;
-    return state.response;
+    state.calls += 1;
+    /* 模拟接口不返回：只在超时中止时失败，用于验证 8 秒超时 */
+    if (state.hang) {
+      return new Promise((resolve, reject) => {
+        if (options.signal) {
+          options.signal.addEventListener('abort', () => reject(new Error('aborted')));
+        }
+      });
+    }
+    if (state.error) return Promise.reject(state.error);
+    return Promise.resolve(state.response);
   }),
 }));
 
@@ -58,6 +71,9 @@ beforeEach(() => {
   state.response = { ok: true, data: payload };
   state.error = null;
   state.url = '';
+  state.calls = 0;
+  state.hang = false;
+  localStorage.clear();
 });
 
 describe('legulegu · 市场宽度', () => {
@@ -163,5 +179,70 @@ describe('legulegu · 市场宽度入库', () => {
     state.stored = null;
     state.error = new Error('市场宽度接口返回 403');
     await expect(loadMarketWidth(true)).rejects.toThrow('403');
+  });
+});
+
+describe('legulegu · 库优先渲染与增量补数', () => {
+  const coveredInDb = {
+    dates: ['2026-10-27'],
+    range: { first: '2024-01-02', last: '2026-10-27' },
+    rows: [{ name: '美容护理', code: '801980.SI', values: [10] }],
+  };
+
+  it('loadMarketWidthFromDb 只读库、不请求接口', async () => {
+    state.stored = coveredInDb;
+    await expect(loadMarketWidthFromDb()).resolves.toEqual(coveredInDb);
+    expect(state.calls).toBe(0);
+  });
+
+  it('库内无数据时 loadMarketWidthFromDb 返回 null', async () => {
+    state.stored = null;
+    await expect(loadMarketWidthFromDb()).resolves.toBeNull();
+    expect(state.calls).toBe(0);
+  });
+
+  it('refreshMarketWidth 从库内最大交易日补数并落库，返回完整历史', async () => {
+    state.stored = coveredInDb;
+    const value = await refreshMarketWidth();
+    expect(state.url).toContain('startDate=2026-10-27');
+    expect(state.saved).toHaveLength(1);
+    expect(state.saved[0].dates).toEqual(['2026-10-27', '2026-10-28']);
+    expect(value).toEqual(coveredInDb);
+  });
+
+  it('当天 TTL 内再次刷新跳过接口请求', async () => {
+    state.stored = coveredInDb;
+    await refreshMarketWidth();
+    expect(state.calls).toBe(1);
+    await expect(refreshMarketWidth()).resolves.toBeNull();
+    expect(state.calls).toBe(1);
+  });
+
+  it('后台刷新失败时静默返回 null 且不写库', async () => {
+    state.stored = coveredInDb;
+    state.error = new Error('市场宽度接口返回 403');
+    await expect(refreshMarketWidth()).resolves.toBeNull();
+    expect(state.saved).toHaveLength(0);
+  });
+
+  it('同一窗口并发刷新只请求一次接口', async () => {
+    state.stored = coveredInDb;
+    const [a, b] = await Promise.all([refreshMarketWidth(), refreshMarketWidth()]);
+    expect(state.calls).toBe(1);
+    expect(a).toEqual(coveredInDb);
+    expect(b).toEqual(coveredInDb);
+  });
+
+  it('接口 8 秒未返回时中止请求并提示超时', async () => {
+    vi.useFakeTimers();
+    try {
+      state.hang = true;
+      const task = refreshMarketWidth({ force: true });
+      const assertion = expect(task).rejects.toThrow('市场宽度接口请求超时');
+      await vi.advanceTimersByTimeAsync(8000);
+      await assertion;
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

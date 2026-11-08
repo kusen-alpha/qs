@@ -31,6 +31,8 @@ export const AlertTrigger = {
 export const MonitorEvent = {
   addWatchList: 'addWatchList',
   deleteWatchList: 'deleteWatchList',
+  // 落库失败回滚：分组窗口据此恢复被同步剪掉的草稿内容
+  rollbackWatchList: 'rollbackWatchList',
 };
 
 /** 跨窗口事件 */

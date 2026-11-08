@@ -8,28 +8,66 @@ import { useSettingStore } from '@/stores/setting';
 import { useMacdStore } from '@/stores/macd';
 import { freshPinia, stock } from '../../helpers';
 
+const { realtimeMock, quoteSourceMock } = vi.hoisted(() => ({
+  realtimeMock: vi.fn(),
+  quoteSourceMock: {
+    env: { live: true, todayTrading: true, useDb: false },
+    rows: vi.fn(),
+    idle: vi.fn(() => 60000),
+    envCalls: vi.fn(),
+  },
+}));
+
 vi.mock('@/api/eastmoney', async (importOriginal) => {
   const actual = await importOriginal();
   return {
     ...actual,
     EastmoneyApi: class {
-      async realtime() {
-        return [];
+      async realtime(...args) {
+        return realtimeMock(...args);
       }
     },
   };
 });
+
+vi.mock('@/utils/quoteSource', () => ({
+  isLiveQuoteWindow: () => quoteSourceMock.env.live,
+  idleDelayMs: () => quoteSourceMock.idle(),
+  loadQuoteEnvironment: (...args) => {
+    quoteSourceMock.envCalls(...args);
+    return Promise.resolve(quoteSourceMock.env);
+  },
+  loadQuoteRows: (...args) => quoteSourceMock.rows(...args),
+  fetchQuotes: async (api, symbols) => {
+    const secids = symbols.map((item) => item.secid);
+    quoteSourceMock.envCalls(secids);
+    const env = quoteSourceMock.env;
+    if (env.useDb) {
+      const rows = await quoteSourceMock.rows(secids);
+      if (rows.length) return { quotes: rows, delay: quoteSourceMock.idle(), source: 'db' };
+    }
+    const quotes = await api.realtime(symbols);
+    const base = env.live && env.todayTrading ? 4000 : 60000;
+    return { quotes, delay: quotes.length ? base : Math.min(base, 20000), source: 'api' };
+  },
+}));
 
 vi.mock('@/utils/kline', async (importOriginal) => {
   const actual = await importOriginal();
   return { ...actual, fetchKline: async () => null };
 });
 
-function mountTable() {
+function mountTable({ env, rows } = {}) {
   freshPinia();
   const monitor = useMonitorStore();
   const setting = useSettingStore();
-  setting.$persist = () => {};
+  realtimeMock.mockReset();
+  realtimeMock.mockResolvedValue([]);
+  quoteSourceMock.env = env || { live: true, todayTrading: true, useDb: false };
+  quoteSourceMock.rows.mockReset();
+  quoteSourceMock.rows.mockResolvedValue(rows || []);
+  quoteSourceMock.idle.mockClear();
+  quoteSourceMock.envCalls.mockClear();
   monitor.watchGroup = [
     { id: 0, id_str: '0', name: '自选', symbols: [stock('600519', '贵州茅台')] },
     {
@@ -171,11 +209,43 @@ describe('ConceptTable · 概念列表', () => {
     expect(names(wrapper)).toEqual(['板块', '行业', '白酒', '啤酒']);
   });
 
-  it('没有行情时平均值显示 -', () => {
+  it('没有行情时平均值显示 -', async () => {
     const { wrapper } = mountTable();
+    await flushPromises();
     const table = wrapper.findComponent({ name: 'ElTable' });
     expect(table.props('data')[0].rangeText).toBe('-');
     expect(table.props('data')[0].turnText).toBe('-');
     expect(table.props('data')[0].macdText).toBe('-');
+  });
+
+  it('非盘中且库已覆盖交易日时读库行情，不再请求接口', async () => {
+    const { wrapper } = mountTable({
+      env: { live: false, todayTrading: true, useDb: true },
+      rows: [
+        { secid: '0.000858', range: 1, turn: 2 },
+        { secid: '1.600036', range: 2, turn: 3 },
+        { secid: '1.600600', range: 3, turn: 4 },
+        { secid: '1.600585', range: 4, turn: 5 },
+      ],
+    });
+    await flushPromises();
+    const table = wrapper.findComponent({ name: 'ElTable' });
+    const row = (name) => table.props('data').find((r) => r.name === name);
+    expect(realtimeMock).not.toHaveBeenCalled();
+    expect(quoteSourceMock.envCalls).toHaveBeenCalledWith([
+      '0.000858',
+      '1.600036',
+      '1.600600',
+      '1.600585',
+    ]);
+    expect(quoteSourceMock.rows).toHaveBeenCalledWith([
+      '0.000858',
+      '1.600036',
+      '1.600600',
+      '1.600585',
+    ]);
+    expect(quoteSourceMock.idle).toHaveBeenCalled();
+    expect(row('行业').rangeText).toBe('2.00%');
+    expect(row('板块').rangeText).toBe('4.00%');
   });
 });

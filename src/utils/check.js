@@ -1,5 +1,5 @@
-import { loadHistory, loadIndustries, loadWatchlist, saveQuotes } from './db';
-import { countTradingDays, reloadHistories } from './klineSync';
+import { cleanOrphanStocks, loadHistory, loadIndustries, loadWatchlist, saveQuotes } from './db';
+import { isTodaySettled, reloadHistories } from './klineSync';
 import { EastmoneyApi } from '../api/eastmoney';
 import { refreshStockIndustries } from '../api/ths';
 
@@ -16,6 +16,18 @@ export const HISTORY_COVER_DATE = '2024-01-10';
 const HISTORY_LIMIT = 1000;
 
 /**
+ * 15:15 前当天K线尚未落库，loadHistory 为图表展示合成的那根不能当作真实历史，
+ * 否则会把当日有合成K线的股票与没有的股票比较，误报「落后 1 个交易日」。
+ */
+function dropUnsettledToday(list, now) {
+  if (isTodaySettled(now)) return list;
+  const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(
+    now.getDate(),
+  ).padStart(2, '0')}`;
+  return list.filter((candle) => candle.date !== today);
+}
+
+/**
  * 纯函数版历史数据齐全度判定：
  * 1. 无历史数据；
  * 2. 首根日期晚于 HISTORY_COVER_DATE（未覆盖 2024-01-01 起）；
@@ -23,14 +35,17 @@ const HISTORY_LIMIT = 1000;
  * 4. 自身区间内缺少其他股票普遍都有的交易日。
  * histories 为 { secid: candles[] }。
  */
-export function evaluateHistory(stocks = [], histories = {}) {
+export function evaluateHistory(stocks = [], histories = {}, now = new Date()) {
   const list = (stocks || []).filter((stock) => stock && stock.secid);
   const rows = list.map((stock) => ({
     stock,
-    candles: (histories[stock.secid] || [])
-      .filter((candle) => candle && candle.date)
-      .slice()
-      .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0)),
+    candles: dropUnsettledToday(
+      (histories[stock.secid] || [])
+        .filter((candle) => candle && candle.date)
+        .slice()
+        .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0)),
+      now,
+    ),
   }));
 
   // 市场日历：统计每根日期出现在多少只股票中，判定单只股票时排除它自己，
@@ -63,7 +78,9 @@ export function evaluateHistory(stocks = [], histories = {}) {
       reasons.push(`起始 ${first}，未覆盖 ${HISTORY_MIN_DATE}`);
     }
     if (marketLast && last < marketLast) {
-      reasons.push(`最新 ${last}，落后 ${countTradingDays(last, marketLast)} 个交易日`);
+      // 用库内真实出现过的日期计数，而不是只跳周末，避免长假后夸大落后天数
+      const gap = allDates.filter((date) => date > last && date <= marketLast).length;
+      reasons.push(`最新 ${last}，落后 ${gap} 个交易日`);
     }
 
     if (refNeed > 0) {
@@ -144,10 +161,11 @@ function stockCode(secid) {
 
 /**
  * 纯函数版 stocks 表数据判定：自选股票在 stocks 表中缺记录，
- * 或记录缺少名称、现价、涨跌幅、换手率、申万行业、同花顺行业等关键字段。
+ * 或记录缺少名称、现价、涨跌幅、换手率、申万行业、同花顺行业等关键字段；
+ * 传入 references（自选 + 概念成员）时，还会把失去全部引用的孤儿股票列为可清理项。
  * rows 为 loadWatchlist().stocks，industries 为 loadIndustries() 的结果。
  */
-export function evaluateStocksData(stocks = [], rows = [], industries = []) {
+export function evaluateStocksData(stocks = [], rows = [], industries = [], references = null) {
   const list = (stocks || []).filter((stock) => stock && stock.secid);
   const rowMap = new Map(
     (rows || []).filter((row) => row && row.secid).map((row) => [row.secid, row]),
@@ -187,13 +205,37 @@ export function evaluateStocksData(stocks = [], rows = [], industries = []) {
     if (reasons.length) issues.push({ ...base, reasons });
   }
 
+  // 孤儿股票：不属于自选也不属于任何概念（概念删除后的遗留数据），可一键清理
+  const refSet =
+    references instanceof Set ? references : references ? new Set(references) : null;
+  if (refSet) {
+    for (const row of rows || []) {
+      const secid = row && row.secid;
+      if (!secid || refSet.has(secid)) continue;
+      // 行业/板块缓存行没有名称，不属于用户股票
+      if (!String(row.name || '').trim()) continue;
+      issues.push({
+        secid,
+        symbol: String(secid).split('.')[1] || '',
+        name: row.name || '',
+        orphan: true,
+        reasons: ['不在自选或任何概念中（孤儿股票）'],
+      });
+    }
+  }
+
+  const stockIssues = issues.filter((issue) => !issue.orphan);
+  const orphanCount = issues.length - stockIssues.length;
   const total = list.length;
-  const complete = total - issues.length;
+  const complete = total - stockIssues.length;
   let summary = '暂无自选股票';
   if (total) {
-    summary = issues.length
-      ? `共 ${total} 只自选股，${complete} 只 stocks 数据完整，${issues.length} 只缺数据`
+    summary = stockIssues.length
+      ? `共 ${total} 只自选股，${complete} 只 stocks 数据完整，${stockIssues.length} 只缺数据`
       : `共 ${total} 只自选股，stocks 数据齐全`;
+  }
+  if (orphanCount) {
+    summary += `${total ? '；' : ''}另有 ${orphanCount} 只孤儿股票可清理`;
   }
 
   return { total, complete, issues, summary, status: issues.length ? 'fail' : 'ok' };
@@ -207,9 +249,17 @@ export async function checkStocksData(
 ) {
   const list = (stocks || []).filter((stock) => stock && stock.secid);
   let rows = [];
+  let references = null;
   try {
     const data = await load();
     rows = (data && data.stocks) || [];
+    // 以数据库为准（不是未保存的草稿）：自选 zx=1 + 概念成员
+    if (data && Array.isArray(data.notions) && Array.isArray(data.members)) {
+      references = new Set([
+        ...rows.filter((row) => row && row.zx).map((row) => row.secid),
+        ...data.members.filter((member) => member && member.secid).map((member) => member.secid),
+      ]);
+    }
   } catch (e) {
     console.error('[check] 读取 stocks 表失败', e);
   }
@@ -219,12 +269,17 @@ export async function checkStocksData(
   } catch (e) {
     console.error('[check] 读取行业字段失败', e);
   }
-  return evaluateStocksData(list, rows, industries);
+  return evaluateStocksData(list, rows, industries, references);
 }
 
 /** 修复历史数据：对异常股票全量重拉 2024-01-01 起的日K */
 export async function repairWatchHistory(secids = []) {
   return reloadHistories((secids || []).filter(Boolean));
+}
+
+/** 修复 stocks 表：删除已失去全部引用的孤儿股票（连带日K与板块成分） */
+export async function repairOrphanStocks(secids = []) {
+  return cleanOrphanStocks((secids || []).filter(Boolean));
 }
 
 /** 修复 stocks 表：重新拉取异常股票的实时行情与申万/同花顺行业并写回 */

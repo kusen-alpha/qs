@@ -2,17 +2,12 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { useSymbolStore } from '@/stores/symbol';
 import { freshPinia } from '../../helpers';
 
-vi.mock('@/utils/file', () => ({
-  writeData: vi.fn(),
-  readData: vi.fn(async () => null),
-  Files: {
-    SETTINGS: { folder: '', file: 'settings.json', encrpt: false },
-    MONITOR: { folder: '', file: 'monitor.dat', encrpt: true },
-    SYMBOL: { folder: '', file: 'symbol.dat', encrpt: true },
-  },
-}));
-
 vi.mock('@/utils/events', () => ({ emit: vi.fn(), on: vi.fn() }));
+
+vi.mock('@/utils/db', () => ({
+  loadSymbolConfigs: vi.fn(async () => ({})),
+  saveSymbolConfigs: vi.fn(async () => ({ saved: true })),
+}));
 
 describe('symbol store · 持仓与提醒配置', () => {
   let store;
@@ -20,13 +15,25 @@ describe('symbol store · 持仓与提醒配置', () => {
   beforeEach(() => {
     freshPinia();
     store = useSymbolStore();
-    store.$persist = () => {};
   });
 
   it('初始为空', () => {
     expect(store.configs).toEqual({});
     expect(store.positionNum()).toBe(0);
     expect(store.alertNum()).toBe(0);
+  });
+
+  it('loadFromDb 从数据库整体回填，空库即空配置', async () => {
+    const { loadSymbolConfigs } = await import('@/utils/db');
+    loadSymbolConfigs.mockResolvedValueOnce({
+      '1.600519': { secid: '1.600519', position: { buyPrice: 100, buyAmount: 10 } },
+    });
+    await store.loadFromDb();
+    expect(store.showPosition('1.600519')).toBe(true);
+
+    loadSymbolConfigs.mockResolvedValueOnce({});
+    await store.loadFromDb();
+    expect(store.configs).toEqual({});
   });
 
   it('addConfig 保存有效配置并发出变更事件', async () => {
@@ -39,12 +46,12 @@ describe('symbol store · 持仓与提醒配置', () => {
   });
 
   it('addConfig 内容相同则跳过', async () => {
-    const { writeData } = await import('@/utils/file');
+    const { saveSymbolConfigs } = await import('@/utils/db');
     const config = { secid: '1.600519', crossAlertConfig: { price: 10 } };
     await store.addConfig(config);
-    writeData.mockClear();
+    saveSymbolConfigs.mockClear();
     await store.addConfig({ ...config });
-    expect(writeData).not.toHaveBeenCalled();
+    expect(saveSymbolConfigs).not.toHaveBeenCalled();
     expect(store.alertNum()).toBe(1);
   });
 
@@ -56,11 +63,16 @@ describe('symbol store · 持仓与提醒配置', () => {
   });
 
   it('deleteSymbolConfig 删除配置', async () => {
-    const { writeData } = await import('@/utils/file');
+    const { saveSymbolConfigs } = await import('@/utils/db');
+    const { emit } = await import('@/utils/events');
     await store.addConfig({ secid: '1.600519', position: { buyPrice: 1, buyAmount: 1 } });
-    writeData.mockClear();
-    store.deleteSymbolConfig('1.600519');
+    saveSymbolConfigs.mockClear();
+    emit.mockClear();
+    await store.deleteSymbolConfig('1.600519');
     expect(store.configs).toEqual({});
-    expect(writeData).toHaveBeenCalledTimes(1);
+    expect(saveSymbolConfigs).toHaveBeenCalledTimes(1);
+    expect(saveSymbolConfigs.mock.calls[0][0]).toEqual({});
+    // 其他窗口需要收到广播才能刷新提醒/持仓图标
+    expect(emit).toHaveBeenCalledWith('symbolConfigChange', {});
   });
 });

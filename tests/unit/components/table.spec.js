@@ -11,11 +11,48 @@ import { useSymbolStore } from '@/stores/symbol';
 import { defaultWatchFields } from '@/constants';
 import { freshPinia, stock } from '../../helpers';
 
-const { realtimeMock, openWindowMock, loadStockConceptsMock } = vi.hoisted(() => ({
+const { realtimeMock, openWindowMock, loadStockConceptsMock, isTauriMock, tauriEmitMock, quoteSourceMock } = vi.hoisted(() => ({
   realtimeMock: vi.fn(),
   openWindowMock: vi.fn(),
   loadStockConceptsMock: vi.fn(),
+  isTauriMock: vi.fn(() => false),
+  tauriEmitMock: vi.fn(() => Promise.resolve()),
+  quoteSourceMock: {
+    env: { live: true, todayTrading: true, useDb: false },
+    rows: vi.fn(),
+    idle: vi.fn(() => 60000),
+    envCalls: vi.fn(),
+  },
 }));
+
+vi.mock('@tauri-apps/api/event', () => ({ emit: tauriEmitMock, listen: vi.fn() }));
+
+vi.mock('@/utils/quoteSource', () => ({
+  isLiveQuoteWindow: () => quoteSourceMock.env.live,
+  idleDelayMs: () => quoteSourceMock.idle(),
+  loadQuoteEnvironment: (...args) => {
+    quoteSourceMock.envCalls(...args);
+    return Promise.resolve(quoteSourceMock.env);
+  },
+  loadQuoteRows: (...args) => quoteSourceMock.rows(...args),
+  fetchQuotes: async (api, symbols) => {
+    const secids = symbols.map((item) => item.secid);
+    quoteSourceMock.envCalls(secids);
+    const env = quoteSourceMock.env;
+    if (env.useDb) {
+      const rows = await quoteSourceMock.rows(secids);
+      if (rows.length) return { quotes: rows, delay: quoteSourceMock.idle(), source: 'db' };
+    }
+    const quotes = await api.realtime(symbols);
+    const base = env.live && env.todayTrading ? 4000 : 60000;
+    return { quotes, delay: quotes.length ? base : Math.min(base, 20000), source: 'api' };
+  },
+}));
+
+vi.mock('@/utils/env', async (importOriginal) => {
+  const actual = await importOriginal();
+  return { ...actual, isTauri: () => isTauriMock() };
+});
 
 vi.mock('@/api/eastmoney', async (importOriginal) => {
   const actual = await importOriginal();
@@ -69,6 +106,8 @@ function mountTable({
   quotes = [],
   responses = null,
   conceptMap = {},
+  env,
+  quoteRows,
 } = {}) {
   freshPinia();
   const setting = useSettingStore();
@@ -76,11 +115,8 @@ function mountTable({
   const symbol = useSymbolStore();
   const macd = useMacdStore();
   const cache = useCacheStore();
-  // 持久化插件在测试里由 helpers 的 shim 提供，这里再兜底一次，避免漏装时抛错
-  [setting, monitor, symbol, macd, cache].forEach((store) => {
-    store.$persist = () => {};
-    store.$hydrate = () => {};
-  });
+  // stateChange 处理会从数据库重读；用例中直接用当前 watchGroup 验证刷新逻辑
+  monitor.loadFromDb = vi.fn(async () => true);
   setting.watchFields = { ...defaultWatchFields, ...fields };
   monitor.watchGroup[0].symbols = symbols;
   symbol.configs = configs;
@@ -94,6 +130,11 @@ function mountTable({
   } else {
     realtimeMock.mockResolvedValue(quotes);
   }
+  quoteSourceMock.env = env || { live: true, todayTrading: true, useDb: false };
+  quoteSourceMock.rows.mockReset();
+  quoteSourceMock.rows.mockResolvedValue(quoteRows || []);
+  quoteSourceMock.idle.mockClear();
+  quoteSourceMock.envCalls.mockClear();
   loadStockConceptsMock.mockReset();
   loadStockConceptsMock.mockResolvedValue(conceptMap);
 
@@ -267,6 +308,37 @@ describe('QuoteTable · 自选行情表格', () => {
     expect(removeConfig).toHaveBeenCalledWith('1.600519');
   });
 
+  it('删除落库失败时提示错误、恢复行、广播回滚且不清理配置', async () => {
+    const symbols = [
+      stock('600519', '贵州茅台', '1.600519'),
+      stock('000858', '五粮液', '0.000858'),
+    ];
+    const quotes = [
+      quote('1.600519', '贵州茅台'),
+      quote('0.000858', '五粮液'),
+    ];
+    const { wrapper, monitor, symbol } = mountTable({ symbols, quotes });
+    await settle(wrapper);
+    const removeConfig = vi.spyOn(symbol, 'deleteSymbolConfig');
+    vi.spyOn(monitor, 'persist').mockResolvedValue(null);
+    isTauriMock.mockReturnValue(true);
+    tauriEmitMock.mockClear();
+
+    await bodyRows(wrapper)[0].trigger('contextmenu', { clientX: 10, clientY: 20 });
+    await wrapper.find('.raw-context-menu li.danger').trigger('click');
+    await settle(wrapper);
+
+    isTauriMock.mockReturnValue(false);
+    expect(removeConfig).not.toHaveBeenCalled();
+    // persist 被替身后不会广播，这条事件只能来自失败后的回滚广播
+    expect(tauriEmitMock).toHaveBeenCalledWith('stateChange', 'rollbackWatchList');
+    expect(monitor.watchGroup[0].symbols.map((s) => s.secid)).toEqual([
+      '1.600519',
+      '0.000858',
+    ]);
+    expect(names(wrapper)).toEqual(['贵州茅台', '五粮液']);
+  });
+
   it('挂载后立即请求实时行情，并按 4 秒间隔轮询刷新', async () => {
     vi.useFakeTimers();
     const symbols = [stock('600519', '贵州茅台', '1.600519')];
@@ -296,6 +368,7 @@ describe('QuoteTable · 自选行情表格', () => {
       release = () => resolve([quote('1.600519', '贵州茅台')]);
     });
     const { wrapper } = mountTable({ symbols, responses: [pending] });
+    await vi.advanceTimersByTimeAsync(0);
     expect(realtimeMock).toHaveBeenCalledTimes(1);
 
     wrapper.unmount();
@@ -304,6 +377,45 @@ describe('QuoteTable · 自选行情表格', () => {
     await vi.advanceTimersByTimeAsync(0);
     await vi.advanceTimersByTimeAsync(20000);
     expect(realtimeMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('非盘中且库已覆盖交易日时直接读库渲染，不再请求行情接口', async () => {
+    const symbols = [stock('600519', '贵州茅台', '1.600519')];
+    const { wrapper } = mountTable({
+      symbols,
+      quotes: [],
+      env: { live: false, todayTrading: true, useDb: true },
+      quoteRows: [
+        quote('1.600519', '贵州茅台', { price: 1500, range: 1.5, price_diff: 22, turn: 0.3 }),
+      ],
+    });
+    await settle(wrapper);
+
+    expect(realtimeMock).not.toHaveBeenCalled();
+    expect(quoteSourceMock.envCalls).toHaveBeenCalledWith(['1.600519']);
+    expect(quoteSourceMock.rows).toHaveBeenCalledWith(['1.600519']);
+    expect(quoteSourceMock.idle).toHaveBeenCalled();
+    expect(names(wrapper)).toEqual(['贵州茅台']);
+    expect(cellsOfRow(wrapper, 0)).toEqual(['贵州茅台', '1500', '1.5%', '22', '0.3%', '-']);
+  });
+
+  it('盘中库落后时仍走接口，并放慢到 60 秒重试', async () => {
+    vi.useFakeTimers();
+    quoteSourceMock.env = { live: true, todayTrading: true, useDb: false };
+    const symbols = [stock('600519', '贵州茅台', '1.600519')];
+    const { wrapper } = mountTable({
+      symbols,
+      responses: [[quote('1.600519', '贵州茅台', { price: 1500 })]],
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(realtimeMock).toHaveBeenCalledTimes(1);
+
+    quoteSourceMock.env = { live: false, todayTrading: true, useDb: false };
+    await vi.advanceTimersByTimeAsync(4000);
+    expect(realtimeMock).toHaveBeenCalledTimes(2);
+
+    await vi.advanceTimersByTimeAsync(60000);
+    expect(realtimeMock).toHaveBeenCalledTimes(3);
   });
 
   it('收到 stateChange 后重新从自选列表刷新表格', async () => {

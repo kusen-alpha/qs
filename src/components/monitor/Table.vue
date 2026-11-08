@@ -217,7 +217,7 @@ import { useMonitorStore } from '../../stores/monitor';
 import { useSymbolStore } from '../../stores/symbol';
 import { useCacheStore } from '../../stores/cache';
 import { useMacdStore } from '../../stores/macd';
-import { on } from '../../utils/events';
+import { on, emit } from '../../utils/events';
 import { openWindow, WindowConfigs } from '../../utils/windows';
 import { DetailPanel, StoreEvent, MonitorEvent } from '../../constants';
 import { signDays } from '../../utils/macd';
@@ -231,6 +231,9 @@ import {
   formatRate,
 } from '../../api/eastmoney';
 import { applyDragRegion } from '../../utils/layout';
+import { fetchQuotes, isLiveQuoteWindow } from '../../utils/quoteSource';
+import { isTauri } from '../../utils/env';
+import { ElMessage } from 'element-plus';
 
 const setting = useSettingStore();
 const monitor = useMonitorStore();
@@ -334,19 +337,24 @@ async function loopRealtime() {
   if (disposed) return;
   let delay = 4000;
   try {
-    const data = await api.realtime(pickBySource(monitor.watchGroup, '1'));
+    // 本窗口要展示的标的：只有它们都刷新到最近交易日才允许读库
+    const list = pickBySource(monitor.watchGroup, '1');
+    const result = await fetchQuotes(api, list);
     if (disposed) return;
-    quotes.value = data;
+    quotes.value = result.quotes;
+    delay = result.delay;
     rows.value = mergeRealtime(quotes.value, rows.value, Object.values(symbol.configs));
     try {
-      cache.updateProfit(summarizeProfit(data, Object.values(symbol.configs)));
+      cache.updateProfit(summarizeProfit(result.quotes, Object.values(symbol.configs)));
     } catch (e) {
       console.error(e);
     }
-    await import('../../utils/events').then(({ emit }) => emit(StoreEvent.REALTIME_EAST, data));
+    if (result.source === 'api') {
+      await import('../../utils/events').then(({ emit }) => emit(StoreEvent.REALTIME_EAST, result.quotes));
+    }
   } catch (e) {
     console.error(e);
-    delay = 20000;
+    delay = isLiveQuoteWindow() ? 20000 : 60000;
   }
   if (disposed) return;
   timers.realtime = setTimeout(loopRealtime, delay);
@@ -453,13 +461,27 @@ async function editSymbol() {
   });
 }
 
-function deleteSymbol() {
+async function deleteSymbol() {
   hideMenu();
   const secid = currentRow.value.secid;
+  const snapshot = JSON.parse(JSON.stringify(monitor.watchGroup));
   rows.value = rows.value.filter((r) => r.secid !== secid);
   monitor.deleteWatchList(secid);
-  monitor.persist(MonitorEvent.deleteWatchList);
-  symbol.deleteSymbolConfig(secid);
+  const result = await monitor.persist(MonitorEvent.deleteWatchList);
+  if (isTauri() && !result) {
+    // 落库失败：回滚快照与界面，避免出现「配置已删、股票还在」的不一致
+    monitor.watchGroup = snapshot;
+    // 首次广播（persist 内）已让其他窗口按删除后的状态同步，回滚后需再广播一次
+    emit('stateChange', MonitorEvent.rollbackWatchList);
+    ElMessage.error({
+      message: '删除失败: 数据库写入失败',
+      type: 'error',
+      duration: 2000,
+    });
+    reload();
+    return;
+  }
+  await symbol.deleteSymbolConfig(secid);
 }
 
 onMounted(async () => {
@@ -470,27 +492,27 @@ onMounted(async () => {
   ensureConcepts();
   applyDragRegion(['el-table__cell', 'cell', 'el-table__empty-block', 'el-table__empty-text']);
 
-  offs.push(await on('stateChange', () => {
-    // 其他窗口写库后同步了 localStorage 快照，这里重新读取以拿到最新自选
-    monitor.$hydrate({ runHooks: false });
+  offs.push(await on('stateChange', async () => {
+    // 数据库是唯一来源：其他窗口写库后重新读取最新自选
+    await monitor.loadFromDb();
     hideMenu();
     reload();
     ensureMacd();
     ensureConcepts();
   }));
-  offs.push(await on('settingChange', (e) => {
+  offs.push(await on('settingChange', async (e) => {
     hideMenu();
     if (e.payload.includes('watchFieldsChange') || e.payload.includes('tableSizeChange') || e.payload.includes('updownColorChange')) {
-      setting.$hydrate({ runHooks: false });
+      await setting.loadFromDb();
     }
     if (e.payload.includes('watchFieldsChange')) {
       ensureMacd();
       ensureConcepts();
     }
   }));
-  offs.push(await on('symbolConfigChange', () => {
+  offs.push(await on('symbolConfigChange', async () => {
     hideMenu();
-    symbol.readConfig();
+    await symbol.loadFromDb();
   }));
   offs.push(await on('hideContextmenu', hideMenu));
 });

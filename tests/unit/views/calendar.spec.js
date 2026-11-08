@@ -23,6 +23,11 @@ vi.mock('@/utils/db', async (importOriginal) => {
 
 vi.mock('@/utils/events', () => ({ emit: vi.fn(), on: vi.fn() }));
 
+vi.mock('@/utils/env', async (importOriginal) => {
+  const actual = await importOriginal();
+  return { ...actual, isTauri: () => true };
+});
+
 const EVENTS = [
   {
     id: 1,
@@ -117,6 +122,37 @@ describe('Calendar 页面 · 独立事件管理窗口', () => {
     await wrapper.vm.remove(EVENTS[0]);
     await flushPromises();
     expect(deleteMock).toHaveBeenCalledWith(1);
+    expect(loadMock).toHaveBeenCalledTimes(2);
+    expect(emit).toHaveBeenCalledWith('calendarChanged');
+  });
+
+  it('删除重复事件时确认框提示会移除整条系列', async () => {
+    const wrapper = await mountView();
+    const confirm = vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue();
+    await wrapper.vm.remove(EVENTS[1]);
+    await flushPromises();
+
+    expect(confirm.mock.calls[0][0]).toContain('整条系列');
+    expect(deleteMock).toHaveBeenCalledWith(2);
+  });
+
+  it('删除非重复事件不显示系列提示', async () => {
+    const wrapper = await mountView();
+    const confirm = vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue();
+    await wrapper.vm.remove(EVENTS[0]);
+    await flushPromises();
+
+    expect(confirm.mock.calls[0][0]).not.toContain('整条系列');
+  });
+
+  it('删除返回 0 行时提示失败并重新加载', async () => {
+    const error = vi.spyOn(ElMessage, 'error').mockImplementation(() => {});
+    const wrapper = await mountView();
+    vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue();
+    deleteMock.mockResolvedValueOnce(0);
+    await wrapper.vm.remove(EVENTS[0]);
+    await flushPromises();
+    expect(error).toHaveBeenCalled();
     expect(loadMock).toHaveBeenCalledTimes(2);
     expect(emit).toHaveBeenCalledWith('calendarChanged');
   });

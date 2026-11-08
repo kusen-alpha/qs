@@ -97,10 +97,10 @@ function cancel() {
   resetDraft();
 }
 
-function save() {
+async function save() {
   try {
     const next = JSON.parse(JSON.stringify(cache.$state));
-    setting.updateSettings(next);
+    await setting.updateSettings(next);
     resetDraft();
     ElMessage.success({
       message: '保存成功',

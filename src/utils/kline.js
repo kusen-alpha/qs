@@ -15,6 +15,8 @@ const MIN_BEG_ISO = '2024-01-01';
 const FULL_COVER_ISO = '2024-01-10';
 /** 单次行情请求超时：东财不可达时不能无限等待，超时后立即走腾讯兜底 */
 const REQUEST_TIMEOUT_MS = 8000;
+/** 15:15 后当天K线才视为完成，与 klineSync 的收盘完成线保持一致 */
+const CLOSE_MINUTES = 15 * 60 + 15;
 
 export const EASTMONEY_HEADERS = {
   Referer: 'https://quote.eastmoney.com/',
@@ -240,6 +242,22 @@ export async function fetchKlineRange(secid, beg = MIN_BEG, end = 20500101) {
   return fetchTencentRange(secid, beg, end);
 }
 
+/** 当天K线是否已完成（15:15 前盘中只有半根K线） */
+function isTodaySettled(now = new Date()) {
+  return now.getHours() * 60 + now.getMinutes() >= CLOSE_MINUTES;
+}
+
+/**
+ * 剔除未完成的当日K线：接口在盘中会返回当天半根K线，
+ * 图表可展示它，但直接落库会污染 histories、板块历史与 MACD。
+ */
+export function settledCandles(candles, now = new Date()) {
+  const list = candles || [];
+  if (isTodaySettled(now)) return list;
+  const today = `${now.getFullYear()}-${pad2(now.getMonth() + 1)}-${pad2(now.getDate())}`;
+  return list.filter((candle) => candle.date !== today);
+}
+
 /** YYYY-MM-DD 的前一天 */
 function dayBefore(iso) {
   const [year, month, day] = String(iso).split('-').map(Number);
@@ -261,12 +279,14 @@ async function fetchOlderRange(secid, firstDate) {
 export async function fetchKline(secid, beg = MIN_BEG) {
   const res = await fetchKlineRange(secid, beg);
   if (res) {
-    await saveHistory(secid, res.candles);
+    // 盘中不落库未完成的当日K线，避免污染 histories / 板块历史 / MACD
+    const persist = settledCandles(res.candles);
+    if (persist.length) await saveHistory(secid, persist);
     // 全量请求只拿到近期窗口时（行情源截断），补拉更早历史，保证最早到 2024-01-01
     if (beg === MIN_BEG && res.candles.length) {
       const older = await fetchOlderRange(secid, res.candles[0].date);
       if (older.length) {
-        await saveHistory(secid, older);
+        await saveHistory(secid, settledCandles(older));
         return { ...res, candles: [...older, ...res.candles] };
       }
     }

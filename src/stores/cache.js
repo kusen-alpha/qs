@@ -11,6 +11,8 @@ export const useCacheStore = defineStore('cache', {
     curSetting: '通用设置',
     group: [],
     selectGroup: 0,
+    // 分组编辑窗口内从自选移除的 secid，保存成功后用于清理提醒/持仓配置
+    removedWatchSecids: [],
     tableSize: 'small',
     updownColor: UpdownColor.redUpGreenDown,
     viewOpacity: 0,
@@ -138,10 +140,18 @@ export const useCacheStore = defineStore('cache', {
         group.symbols = [...new Set(group.symbols)];
       }
     },
+    /** 按 secid 删除（无 secid 时回退 6 位代码）；避免上证指数与同码个股被一起删掉 */
     delSymbol(symbol, groupId) {
       const group = this.findConceptById(groupId);
-      if (group) {
-        group.symbols = group.symbols.filter((s) => s.symbol !== symbol.symbol);
+      if (!group) return;
+      const key = symbol.secid || symbol.symbol;
+      group.symbols = (group.symbols || []).filter((s) => (s.secid || s.symbol) !== key);
+      // 删除自选时同步从所有概念移除：与 monitor.deleteWatchList 的「删自选即彻底清除」语义一致
+      if (Number(groupId) === 0) {
+        for (const node of this.allConcepts()) {
+          if (Number(node.id) === 0) continue;
+          node.symbols = (node.symbols || []).filter((s) => (s.secid || s.symbol) !== key);
+        }
       }
     },
     copySymbols(symbols, to) {
